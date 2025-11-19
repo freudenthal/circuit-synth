@@ -695,20 +695,28 @@ class SchematicWriter:
                     first_api_component.mirror = comp.mirror
 
                 # Store hierarchy path and project name for instances generation
+                # These are INTERNAL properties - hidden from user view but retained for parsing
                 if self.hierarchical_path:
-                    first_api_component.properties["hierarchy_path"] = "/" + "/".join(
-                        self.hierarchical_path
-                    )
+                    hierarchy_path_value = "/" + "/".join(self.hierarchical_path)
+                    first_api_component.properties["hierarchy_path"] = hierarchy_path_value
+                    # Mark as hidden so it doesn't clutter the schematic
+                    first_api_component.hidden_properties.add("hierarchy_path")
+                    logger.debug(f"  Storing hidden hierarchy_path property: {hierarchy_path_value}")
 
                 # Store project name for the instances section in new KiCad format
+                # Hidden from user view but retained for parsing
                 first_api_component.properties["project_name"] = self.project_name
+                first_api_component.hidden_properties.add("project_name")
+                logger.debug(f"  Storing hidden project_name property: {self.project_name}")
 
                 # CRITICAL: Store root UUID for instances path generation
                 # The parser needs this to create correct instance paths
+                # Hidden from user view but retained for parsing
                 if self.hierarchical_path and len(self.hierarchical_path) > 0:
                     root_uuid = self.hierarchical_path[0]
                     first_api_component.properties["root_uuid"] = root_uuid
-                    logger.debug(f"  Storing root_uuid property: {root_uuid}")
+                    first_api_component.hidden_properties.add("root_uuid")
+                    logger.debug(f"  Storing hidden root_uuid property: {root_uuid}")
 
                 # Create instances for the new KiCad format (20250114+)
                 # The path should contain only sheet UUIDs, not component UUID
@@ -1066,6 +1074,9 @@ class SchematicWriter:
         1. Is shared with the parent circuit (passed as parameter), OR
         2. Is used by any child circuit (needs to connect down to children)
 
+        Power nets NEVER need hierarchical labels because power symbols
+        create global connections across all sheets.
+
         Local labels are ONLY for nets that are purely internal to this sheet.
 
         Args:
@@ -1074,6 +1085,15 @@ class SchematicWriter:
         Returns:
             bool: True if net should have hierarchical label, False for local label
         """
+        # Power nets don't need hierarchical labels - power symbols create global
+        # connections across all sheets (#554).
+        if hasattr(net_obj, "is_power") and net_obj.is_power:
+            logger.debug(
+                f"Net '{net_obj.name}' is power net - skipping hierarchical label "
+                f"(power symbol creates global connection)"
+            )
+            return False
+
         # A net needs a HIERARCHICAL label (and a matching sheet pin) only if it
         # crosses this sheet's boundary: shared with the parent circuit, or used
         # by a child circuit. Nets that are purely internal to this sheet get a
@@ -1661,6 +1681,36 @@ class SchematicWriter:
                     internal_net_names.append(child_net.name)
 
             pin_list = sorted(set(shared_net_names))
+
+            # ISSUE #554: Filter out power nets from sheet pins
+            # Power nets use power symbols which create global connections,
+            # so they don't need sheet pins or hierarchical labels
+            power_nets_filtered = []
+            non_power_pin_list = []
+            for net_name in pin_list:
+                # Find the net object to check if it's a power net
+                net_obj = None
+                for child_net in child_nets:
+                    if child_net.name == net_name:
+                        net_obj = child_net
+                        break
+
+                # Skip power nets - they use global power symbols
+                if net_obj and hasattr(net_obj, "is_power") and net_obj.is_power:
+                    power_nets_filtered.append(net_name)
+                    logger.debug(
+                        f"Skipping sheet pin for power net '{net_name}' "
+                        f"(power symbol creates global connection)"
+                    )
+                else:
+                    non_power_pin_list.append(net_name)
+
+            if power_nets_filtered:
+                logger.info(
+                    f"Filtered {len(power_nets_filtered)} power nets from sheet '{usage_label}' pins: {power_nets_filtered}"
+                )
+
+            pin_list = non_power_pin_list
 
             # CRITICAL FIX: Also include the parameters from child circuit instances
             # For subcircuits that only contain other subcircuits (no components),
