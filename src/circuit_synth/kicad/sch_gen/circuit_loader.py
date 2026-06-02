@@ -281,30 +281,22 @@ def _parse_circuit(circ_data: dict, sub_dict: Dict[str, Circuit]) -> Circuit:
             comp_ref = conn["component"]
             pin_data = conn["pin"]
 
-            # Enhanced pin identification - store the most specific identifier available.
-            # Pin number is preferred over name because multiple pins can share the same
-            # name (e.g. GND pads), which would cause all of them to resolve to the same
-            # coordinates. Pin numbers are always unique within a component.
+            # Pin identification for label placement. Use the pin NUMBER first:
+            # it is unique per component, whereas a NAME is shared by every pin
+            # of the same function (VDD/VDDQ, OUT, PGND, ...). Resolving by name
+            # makes find_pin_by_identifier() return the first match, so all those
+            # pins collapse onto one coordinate and only one gets a label/wire —
+            # the rest float. The number keeps each physical pin distinct.
             pin_identifier = None
-
-            # First check for number (unique per pin)
-            if "number" in pin_data:
+            if "number" in pin_data and str(pin_data["number"]) not in ("", "~"):
                 pin_identifier = str(pin_data["number"])
-                logger.debug(
-                    f"Using pin number '{pin_identifier}' for {comp_ref} in net {net_name}"
-                )
-            # Then fall back to name
-            elif "name" in pin_data and pin_data["name"] and pin_data["name"] != "~":
+            elif "name" in pin_data and pin_data["name"] not in ("~", ""):
                 pin_identifier = pin_data["name"]
-                logger.debug(
-                    f"Using pin name '{pin_identifier}' for {comp_ref} in net {net_name}"
-                )
-            # Finally fall back to pin_id
             else:
                 pin_identifier = str(pin_data.get("pin_id", ""))
-                logger.debug(
-                    f"Using pin ID '{pin_identifier}' for {comp_ref} in net {net_name}"
-                )
+            logger.debug(
+                f"Using pin id '{pin_identifier}' for {comp_ref} in net {net_name}"
+            )
 
             conn_key = (comp_ref, pin_identifier)
             if conn_key in seen_connections:
