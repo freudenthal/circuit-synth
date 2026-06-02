@@ -627,10 +627,18 @@ class SchematicWriter:
                     logger.debug(
                         f"      Adding multi-unit component with {unit_count} units"
                     )
-                    # Add each unit with a vertical offset
-                    unit_spacing = (
-                        12.7  # 0.5 inch (12.7mm) vertical spacing between units
-                    )
+                    # Add each unit with a vertical offset equal to the symbol's
+                    # own height (+margin) so large multi-unit parts (e.g. MCUs)
+                    # don't stack on top of each other.
+                    unit_spacing = 12.7  # fallback: 0.5 inch
+                    try:
+                        _ld = SymbolLibCache.get_symbol_data(comp.lib_id)
+                        _bb = SymbolBoundingBoxCalculator.calculate_bounding_box(
+                            _ld, include_properties=True
+                        )
+                        unit_spacing = max(12.7, (_bb[3] - _bb[1]) + 5.08)
+                    except Exception:
+                        pass
                     for unit_num in range(1, unit_count + 1):
                         unit_position = (
                             comp.position.x,
@@ -893,10 +901,16 @@ class SchematicWriter:
                     )
                     width = max_x - min_x
                     height = max_y - min_y
+                    # Multi-unit symbols stack their units vertically when placed
+                    # (see the add_component loop), so reserve space for every unit
+                    # or units 2..n collide with neighbouring components.
+                    _sym = get_symbol_cache().get_symbol(comp.lib_id)
+                    _ucount = getattr(_sym, "units", 1) if _sym else 1
+                    if _ucount > 1:
+                        height = height * _ucount
                     logger.debug(
-                        f"🔍 PLACEMENT: Calculated bbox for {placement_key}: {width:.2f} x {height:.2f} mm",
-                        file=sys.stderr,
-                        flush=True,
+                        f"PLACEMENT: Calculated bbox for {placement_key}: "
+                        f"{width:.2f} x {height:.2f} mm ({_ucount} unit(s))"
                     )
 
                 component_bboxes.append((placement_key, width, height))
@@ -1060,41 +1074,42 @@ class SchematicWriter:
         Returns:
             bool: True if net should have hierarchical label, False for local label
         """
-        # Check if shared with parent circuit
-        parent_circuit = None
-        for circ_name, circ in self.all_subcircuits.items():
-            for child_info in circ.child_instances:
-                if child_info["sub_name"] == self.circuit.name:
-                    parent_circuit = circ
-                    break
-            if parent_circuit:
-                break
+        # A net needs a HIERARCHICAL label (and a matching sheet pin) only if it
+        # crosses this sheet's boundary: shared with the parent circuit, or used
+        # by a child circuit. Nets that are purely internal to this sheet get a
+        # plain LOCAL label. This mirrors the sheet-pin logic in
+        # _add_subcircuit_sheets (which only exposes shared nets as pins).
+        #
+        # Matching is by Net-object identity with a name-based fallback, because
+        # circuits are reconstructed from JSON and object identity does not
+        # survive that round-trip.
+        net_name = getattr(net_obj, "name", None)
 
-        if parent_circuit:
-            parent_nets = (
-                parent_circuit.nets.values()
-                if isinstance(parent_circuit.nets, dict)
-                else parent_circuit.nets
-            )
-            for parent_net in parent_nets:
-                if parent_net is net_obj:  # same object reference
+        def _net_names(circ):
+            if circ is None:
+                return set()
+            nets = circ.nets.values() if isinstance(circ.nets, dict) else circ.nets
+            return {n.name for n in nets}
+
+        # 1) Shared with the parent sheet?
+        for circ in self.all_subcircuits.values():
+            found_parent = False
+            for child_info in getattr(circ, "child_instances", []) or []:
+                if child_info.get("sub_name") == self.circuit.name:
+                    found_parent = True
+                    break
+            if found_parent:
+                if net_name in _net_names(circ):
                     return True
-            # Fallback: name matching for JSON-loaded circuits
-            if net_obj.name in {n.name for n in parent_nets}:
+                break  # each sheet has exactly one parent
+
+        # 2) Used by a child sheet?
+        for child_info in getattr(self.circuit, "child_instances", []) or []:
+            child_circ = self.all_subcircuits.get(child_info.get("sub_name"))
+            if net_name in _net_names(child_circ):
                 return True
 
-        # Check if used by any child circuit
-        for child_info in self.circuit.child_instances:
-            child_circ = self.all_subcircuits[child_info["sub_name"]]
-            child_nets = (
-                child_circ.nets.values()
-                if isinstance(child_circ.nets, dict)
-                else child_circ.nets
-            )
-            for child_net in child_nets:
-                if child_net is net_obj or child_net.name == net_obj.name:
-                    return True
-
+        # Otherwise it is internal to this sheet -> local label.
         return False
 
     def _add_power_symbol(
@@ -1462,7 +1477,13 @@ class SchematicWriter:
                     LabelType.HIERARCHICAL if is_hierarchical else LabelType.LOCAL
                 )
 
-                # Create label using the API
+                # Rotation follows global_angle (KiCad convention, already correct
+                # for hierarchical labels). The justify MUST match it: the
+                # local-label serializer otherwise defaults to "left", which makes
+                # 180deg (left-side) labels read back into the component body. Apply
+                # the canonical justify to BOTH label kinds.
+                from ..schematic.label_utils import calculate_hierarchical_label_justify
+                net_label_justify = calculate_hierarchical_label_justify(global_angle)
                 label = Label(
                     uuid=str(uuid_module.uuid4()),
                     position=Point(global_x, global_y),
@@ -1510,6 +1531,7 @@ class SchematicWriter:
                             ),
                             "rotation": label.rotation,
                             "size": label.size,
+                            "justify_h": net_label_justify,
                         }
                         self.schematic._data["labels"].append(label_dict)
 
