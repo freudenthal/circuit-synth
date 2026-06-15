@@ -880,9 +880,21 @@ class SchematicWriter:
             # Create unique placement keys for multi-unit components
             placement_key_map = {}  # Maps unique placement key -> component
             for comp in components_needing_placement:
-                # Create unique key for placement (reference + unit number)
+                # Create a DISTINCT placement key per component instance so the
+                # text-flow placer positions every multi-unit body separately.
+                # comp.unit is unreliable here (the kicad-sch-api round-trip can
+                # reset it to 1 for every unit of a part), which previously made
+                # all units share one key -> only unit 1 placed, units 2..n left
+                # stacked too tightly -> different-net pin labels coincided
+                # (e.g. 74HC74 ~R1 over ~S2 => +5V/RSTN short). Disambiguate
+                # colliding keys with a counter so each body gets its own slot.
                 unit_num = getattr(comp, "unit", 1)
                 placement_key = f"{comp.reference}_U{unit_num}"
+                if placement_key in placement_key_map:
+                    _dup = 2
+                    while f"{placement_key}#{_dup}" in placement_key_map:
+                        _dup += 1
+                    placement_key = f"{placement_key}#{_dup}"
                 placement_key_map[placement_key] = comp
 
                 # Get symbol library data
@@ -895,12 +907,8 @@ class SchematicWriter:
                     width, height = 10.0, 10.0
                 else:
                     # Calculate accurate bounding box including pin labels for proper collision detection
-                    import sys
-
                     logger.debug(
-                        f"\nPLACEMENT: About to calculate bbox for {placement_key} ({comp.lib_id})",
-                        file=sys.stderr,
-                        flush=True,
+                        f"PLACEMENT: About to calculate bbox for {placement_key} ({comp.lib_id})"
                     )
                     min_x, min_y, max_x, max_y = (
                         SymbolBoundingBoxCalculator.calculate_bounding_box(
@@ -909,16 +917,13 @@ class SchematicWriter:
                     )
                     width = max_x - min_x
                     height = max_y - min_y
-                    # Multi-unit symbols stack their units vertically when placed
-                    # (see the add_component loop), so reserve space for every unit
-                    # or units 2..n collide with neighbouring components.
-                    _sym = get_symbol_cache().get_symbol(comp.lib_id)
-                    _ucount = getattr(_sym, "units", 1) if _sym else 1
-                    if _ucount > 1:
-                        height = height * _ucount
+                    # Each unit now has its own placement key (placed separately),
+                    # so reserve only this body's bbox -- no need to inflate by the
+                    # unit count. The full-symbol bbox already exceeds the pin span,
+                    # keeping adjacent unit bodies clear of each other.
                     logger.debug(
                         f"PLACEMENT: Calculated bbox for {placement_key}: "
-                        f"{width:.2f} x {height:.2f} mm ({_ucount} unit(s))"
+                        f"{width:.2f} x {height:.2f} mm"
                     )
 
                 component_bboxes.append((placement_key, width, height))
