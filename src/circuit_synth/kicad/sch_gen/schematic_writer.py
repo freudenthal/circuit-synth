@@ -442,6 +442,13 @@ class SchematicWriter:
         place_time = time.perf_counter() - place_start
         logger.info(f"STEP 2/8: Components placed in {place_time*1000:.2f}ms")
 
+        # Restore the unit number on each multi-unit body. The component_manager
+        # index keys them as "{ref}_unit{n}" (correct), but the body objects'
+        # .unit attribute can read back as 1 for every unit (lost in the
+        # collection round-trip). Without this, all units serialize as (unit 1)
+        # -> KiCad duplicates unit-1 pins and cannot resolve unit-3 pins.
+        self._restore_multi_unit_numbers()
+
         # Add pin-level net labels
         labels_start = time.perf_counter()
         logger.info(
@@ -809,6 +816,51 @@ class SchematicWriter:
                         updated_connections.append((comp_ref, pin_identifier))
 
                 net.connections = updated_connections
+
+    def _restore_multi_unit_numbers(self):
+        """
+        Force each multi-unit body's .unit attribute to match its index key.
+
+        The component_manager indexes instances as "{reference}_unit{n}", which
+        is authoritative, but the body objects themselves can report .unit == 1
+        for every unit (the value is lost when the component round-trips through
+        the kicad-sch-api collection). Since serialization writes component.unit,
+        every body would otherwise be emitted as (unit 1), making KiCad treat the
+        three 74HC74 bodies as three copies of unit 1: it then duplicates unit-1
+        pins and never resolves the unit-3 (VCC/GND) pins. Re-stamp .unit here.
+        """
+        index = getattr(self.component_manager, "_component_index", None)
+        if not index:
+            return
+        fixed = 0
+        for key, comp in index.items():
+            # key format: "{reference}_unit{n}"
+            marker = "_unit"
+            pos = key.rfind(marker)
+            if pos < 0:
+                continue
+            suffix = key[pos + len(marker):]
+            if not suffix.isdigit():
+                continue
+            unit_num = int(suffix)
+            try:
+                changed = False
+                if getattr(comp, "unit", None) != unit_num:
+                    comp.unit = unit_num
+                    changed = True
+                # KiCad resolves the netlist from the per-instance unit (in the
+                # symbol's (instances ...) block), not the symbol-level unit, so
+                # re-stamp those too -- otherwise unit 3 still reads as unit 1.
+                for inst in getattr(comp, "instances", None) or []:
+                    if getattr(inst, "unit", None) != unit_num:
+                        inst.unit = unit_num
+                        changed = True
+                if changed:
+                    fixed += 1
+            except Exception:
+                pass
+        if fixed:
+            logger.info(f"🔧 Restored unit numbers on {fixed} multi-unit body(ies)")
 
     def _place_components(self):
         """
