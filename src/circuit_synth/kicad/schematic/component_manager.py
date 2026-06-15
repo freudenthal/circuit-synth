@@ -429,6 +429,23 @@ class ComponentManager:
         # Not found
         return None
 
+    def find_component_unit(
+        self, reference: str, unit: int
+    ) -> Optional[SchematicSymbol]:
+        """
+        Find the specific unit instance of a (possibly multi-unit) component.
+
+        Multi-unit parts are stored as separate symbol instances sharing one
+        reference but with distinct positions, indexed as "{reference}_unit{n}".
+        Returns the matching unit if present, else falls back to find_component
+        (single-unit parts, or unit 0 / common pins).
+        """
+        if unit:
+            comp = self._component_index.get(f"{reference}_unit{unit}")
+            if comp:
+                return comp
+        return self.find_component(reference)
+
     def list_components(self) -> List[SchematicSymbol]:
         """
         Get all components in the schematic.

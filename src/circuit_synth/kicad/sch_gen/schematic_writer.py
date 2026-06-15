@@ -1417,6 +1417,17 @@ class SchematicWriter:
                     )
                     continue
 
+                # Multi-unit: anchor the label to the body of the pin's OWN unit.
+                # Every unit shares one reference but sits at a different position;
+                # using the base component for all pins stacks unit-2/3 labels onto
+                # unit-1's body, so labels of different nets coincide and KiCad fuses
+                # them (e.g. +5V/GND short on a 74HC74). Resolve the per-unit instance.
+                pin_unit = int(pin_dict.get("unit", 0) or 0)
+                comp_for_pin = (
+                    self.component_manager.find_component_unit(actual_ref, pin_unit)
+                    or comp
+                )
+
                 # Calculate pin position
                 anchor_x = float(pin_dict.get("x", 0.0))
                 anchor_y = float(pin_dict.get("y", 0.0))
@@ -1429,15 +1440,15 @@ class SchematicWriter:
                 )
                 logger.debug(f"  component rotation: {comp.rotation}°")
 
-                # Rotate coords by component rotation
-                r = math.radians(comp.rotation)
+                # Rotate coords by component rotation (of the pin's own unit body)
+                r = math.radians(comp_for_pin.rotation)
                 local_x = anchor_x
                 local_y = -anchor_y
                 rx = (local_x * math.cos(r)) - (local_y * math.sin(r))
                 ry = (local_x * math.sin(r)) + (local_y * math.cos(r))
 
-                global_x = comp.position.x + rx
-                global_y = comp.position.y + ry
+                global_x = comp_for_pin.position.x + rx
+                global_y = comp_for_pin.position.y + ry
 
                 # Calculate label angle (opposite to pin orientation for correct text direction)
                 # Pin orientation indicates direction pin points FROM component
