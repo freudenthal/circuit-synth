@@ -43,6 +43,13 @@ class SymbolLibCache:
     _instance = None
     _initialized = False
 
+    # Bump when the parsed-symbol schema changes so stale on-disk caches are
+    # ignored after an upgrade. The disk cache is keyed on the .kicad_sym path
+    # hash, not the parser code, so without this token a pre-existing cache would
+    # silently serve pins lacking the per-pin "unit" field (added 2026-06) and
+    # multi-unit labels would stack again. v2 = pins carry "unit".
+    _CACHE_VERSION = "v2-unit"
+
     # Class-level data structures for singleton pattern
     _library_data: Dict[str, Dict[str, Any]] = {}
     _symbol_index: Dict[str, Dict[str, Any]] = {}
@@ -469,7 +476,7 @@ class SymbolLibCache:
             :8
         ]
         stem = lib_path.stem.replace(".", "_")
-        return f"{stem}_{path_hash}.json"
+        return f"{stem}_{path_hash}_{self._CACHE_VERSION}.json"
 
     @classmethod
     def _is_cache_expired(cls, cache_time: float, ttl_hours: int) -> bool:
