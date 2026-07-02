@@ -8,6 +8,7 @@ Provides both automatic installation and manual setup instructions.
 
 import os
 import platform
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -20,6 +21,25 @@ from rich.prompt import Confirm
 from rich.text import Text
 
 console = Console()
+
+
+def _newest_kicad_version_dir(kicad_root: Path, default: str) -> str:
+    """Return the newest version subdir name under ``kicad_root``.
+
+    KiCad's Linux 3rdparty plugin directory is version-specific
+    (``~/.local/share/kicad/<ver>/3rdparty/plugins``). Detect the highest
+    installed version instead of hardcoding one, falling back to ``default``
+    when nothing is installed yet.
+    """
+    if kicad_root.is_dir():
+        versions = [
+            (tuple(int(p) for p in c.name.split(".")), c.name)
+            for c in kicad_root.iterdir()
+            if c.is_dir() and re.fullmatch(r"\d+(?:\.\d+)*", c.name)
+        ]
+        if versions:
+            return max(versions)[1]
+    return default
 
 
 def get_kicad_plugin_directories() -> Dict[str, Path]:
@@ -49,14 +69,10 @@ def get_kicad_plugin_directories() -> Dict[str, Path]:
             "system": Path("C:/Program Files/KiCad/share/kicad/scripting/plugins"),
         }
     else:  # Linux
+        kicad_root = Path.home() / ".local" / "share" / "kicad"
+        version = _newest_kicad_version_dir(kicad_root, default="9.0")
         return {
-            "user": Path.home()
-            / ".local"
-            / "share"
-            / "kicad"
-            / "8.0"
-            / "3rdparty"
-            / "plugins",
+            "user": kicad_root / version / "3rdparty" / "plugins",
             "system": Path("/usr/share/kicad/scripting/plugins"),
         }
 

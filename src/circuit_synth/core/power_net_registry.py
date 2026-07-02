@@ -6,10 +6,29 @@ Supports automatic conversion of common power nets (GND, VCC, etc.)
 to power symbols without explicit user declaration.
 """
 
+import os
 import re
 from pathlib import Path
-from typing import Dict, Set, Optional
+from typing import Dict, List, Set, Optional
 from loguru import logger
+
+
+def _sorted_kicad_version_dirs(kicad_root: Path) -> List[Path]:
+    """Return versioned KiCad dirs under ``kicad_root``, newest first.
+
+    Matches children named like ``8.0``, ``9.0``, ``10.0`` and sorts numerically
+    descending. Avoids hardcoding version numbers so future KiCad releases are
+    discovered automatically.
+    """
+    if not kicad_root.is_dir():
+        return []
+    versioned = []
+    for child in kicad_root.iterdir():
+        if child.is_dir() and re.fullmatch(r"\d+(?:\.\d+)*", child.name):
+            key = tuple(int(p) for p in child.name.split("."))
+            versioned.append((key, child))
+    versioned.sort(key=lambda t: t[0], reverse=True)
+    return [path for _, path in versioned]
 
 
 class PowerNetRegistry:
@@ -105,19 +124,54 @@ class PowerNetRegistry:
             self._power_symbols[without_plus_decimal] = lib_id
 
     def _find_power_library(self) -> Optional[Path]:
-        """Find power.kicad_sym in KiCad library paths."""
-        # Check common locations
+        """Find power.kicad_sym in KiCad library paths.
+
+        Discovery order:
+        1. KICAD*_SYMBOL_DIR environment variables (any version).
+        2. Version-agnostic system locations.
+        3. Per-user/per-platform install dirs, globbing every installed KiCad
+           version and preferring the newest (so KiCad 10+ is found without a
+           code change).
+        """
         search_paths = [
             Path("tests/test_data/kicad_symbols/power.kicad_sym"),
             Path("tests/test_data/kicad9/power.kicad_sym"),
-            Path("/usr/share/kicad/symbols/power.kicad_sym"),
-            Path.home() / ".local/share/kicad/8.0/symbols/power.kicad_sym",
-            Path.home() / ".local/share/kicad/9.0/symbols/power.kicad_sym",
-            # macOS paths
-            Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/power.kicad_sym"),
-            Path.home() / "Library/Application Support/kicad/8.0/symbols/power.kicad_sym",
-            Path.home() / "Library/Application Support/kicad/9.0/symbols/power.kicad_sym",
         ]
+
+        # 1. Environment variables (KICAD_SYMBOL_DIR, KICAD10_SYMBOL_DIR, ...)
+        for env_name, env_val in os.environ.items():
+            if env_name.startswith("KICAD") and env_name.endswith("SYMBOL_DIR"):
+                for part in env_val.split(os.pathsep):
+                    if part:
+                        search_paths.append(Path(part) / "power.kicad_sym")
+
+        # 2. Version-agnostic system locations
+        search_paths.extend(
+            [
+                Path("/usr/share/kicad/symbols/power.kicad_sym"),
+                Path("/usr/local/share/kicad/symbols/power.kicad_sym"),
+                Path(
+                    "/Applications/KiCad/KiCad.app/Contents/SharedSupport/"
+                    "symbols/power.kicad_sym"
+                ),
+            ]
+        )
+
+        # 3. Versioned install roots, newest first (Linux, macOS, Windows)
+        home = Path.home()
+        versioned_roots = [
+            home / ".local/share/kicad",
+            home / "Library/Application Support/kicad",
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "KiCad",
+        ]
+        for root in versioned_roots:
+            for versioned in _sorted_kicad_version_dirs(root):
+                # Linux/macOS: <root>/<ver>/symbols ; Windows install layout:
+                # <PF>/KiCad/<ver>/share/kicad/symbols
+                search_paths.append(versioned / "symbols" / "power.kicad_sym")
+                search_paths.append(
+                    versioned / "share" / "kicad" / "symbols" / "power.kicad_sym"
+                )
 
         for path in search_paths:
             if path.exists():
