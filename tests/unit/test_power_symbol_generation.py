@@ -151,8 +151,13 @@ class TestPowerSymbolGeneration:
             assert 'hierarchical_label "VCC"' not in content
             assert 'hierarchical_label "+3V3"' not in content
 
-    def test_regular_nets_still_use_hierarchical_labels(self):
-        """Non-power nets should still use hierarchical labels."""
+    def test_regular_nets_use_local_labels(self):
+        """Non-power nets on a flat/root sheet use local labels.
+
+        PR #608 changed internal flat-sheet regular nets from hierarchical labels
+        to local labels (a hierarchical label without a matching sheet pin does not
+        render a connection in KiCad). Power nets still become power symbols.
+        """
 
         @circuit(name="test_mixed")
         def test_mixed():
@@ -195,8 +200,9 @@ class TestPowerSymbolGeneration:
             assert 'lib_id "power:GND"' in content
             assert 'hierarchical_label "GND"' not in content
 
-            # DATA should use hierarchical label
-            assert 'hierarchical_label "DATA"' in content
+            # DATA is an internal flat-sheet net: local label, not hierarchical.
+            assert '(label "DATA"' in content
+            assert 'hierarchical_label "DATA"' not in content
 
 
 class TestNetJSONSerialization:
