@@ -95,14 +95,14 @@ if __name__ == "__main__":
     circuit_obj.generate_kicad_project(
         project_name="led_blinker",
         placement_algorithm="hierarchical",
-        generate_pcb=True,
+        generate_pcb=False,
     )
 
     print("✅ LED blinker circuit generated!")
     print("📁 Open in KiCad: led_blinker/led_blinker.kicad_pro")
     print()
 
-    # Generate manufacturing files (BOM, PDF, Gerbers)
+    # Generate manufacturing files (BOM and PDF)
     print("📦 Generating manufacturing files...")
     print()
 
@@ -123,15 +123,8 @@ if __name__ == "__main__":
         print(f"⚠️  PDF generation failed: {pdf_result.get('error')}")
     print()
 
-    # Generate Gerber files for manufacturing
-    gerber_result = circuit_obj.generate_gerbers(project_name="led_blinker")
-    if gerber_result["success"]:
-        print(f"✅ Gerber files generated: {gerber_result['output_dir']}")
-        print(f"   Gerber files: {len(gerber_result['gerber_files'])}")
-        if gerber_result["drill_files"]:
-            print(f"   Drill files: {gerber_result['drill_files']}")
-    else:
-        print(f"⚠️  Gerber generation failed: {gerber_result.get('error')}")
+    # NOTE: Gerber/PCB export is not available in this build (licensed feature
+    # of upstream circuit-synth). Tracked as a wishlist item in TODO.md.
     print()
 
     print("📊 Circuit Analysis:")

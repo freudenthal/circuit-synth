@@ -182,7 +182,7 @@ if __name__ == '__main__':
     circuit_obj = my_circuit()
     circuit_obj.generate_kicad_project(
         project_name="my_project",
-        generate_pcb=True
+        generate_pcb=False
     )
 ```
 
@@ -198,15 +198,11 @@ bom_result = circuit_obj.generate_bom(project_name="my_project")
 
 # 2. PDF Schematic - Documentation and review
 pdf_result = circuit_obj.generate_pdf_schematic(project_name="my_project")
-
-# 3. Gerber Files - PCB manufacturing (JLCPCB, PCBWay, etc.)
-gerber_result = circuit_obj.generate_gerbers(project_name="my_project")
 ```
 
 **Generated files:**
 - `my_project/my_project_bom.csv` - Component list with references and values
 - `my_project/my_project_schematic.pdf` - Printable schematic documentation
-- `my_project/gerbers/` - Complete Gerber package for PCB fabrication
 
 """
 
@@ -222,14 +218,8 @@ gerber_result = circuit_obj.generate_gerbers(project_name="my_project")
         if config.include_agents:
             readme += """## 🤖 AI-Powered Design with Claude Code
 
-This project includes specialized circuit design agents in `.claude/agents/`:
-
-- **circuit-architect**: Master circuit design coordinator
-- **circuit-synth**: Circuit code generation and KiCad integration
-- **simulation-expert**: SPICE simulation and validation
-- **component-guru**: Component sourcing and manufacturing optimization
-
-Use natural language to design circuits with AI assistance!
+This project is set up for AI-assisted circuit design with Claude Code.
+See the `.claude/` directory for any installed skills.
 
 """
 
@@ -289,28 +279,20 @@ This project includes the following circuit templates:
 
         # Add available tools
         if config.include_agents:
-            claude_md += """## ⚡ Available Tools & Commands
+            claude_md += """## ⚡ AI Tooling
 
-### Slash Commands
-- `/find-symbol` - Search KiCad symbol libraries
-- `/find-footprint` - Search KiCad footprint libraries
-- `/find_stm32` - STM32-specific component search
-
-### Specialized Agents
-- **circuit-architect** - Master coordinator for complex projects
-- **circuit-synth** - Circuit code generation and KiCad integration
-- **simulation-expert** - SPICE simulation and validation
-- **component-guru** - Component sourcing and manufacturing
+See the `.claude/` directory in this project for any installed skills.
 
 """
 
         # Add workflow guidance
         claude_md += """## 🔧 Development Workflow
 
-1. **Component Selection**: Use `/find-symbol` and `/find-footprint` to find KiCad components
+1. **Component Selection**: Find KiCad symbols/footprints (browse
+   `<KiCad>/share/kicad/symbols` or use the KiCad symbol editor)
 2. **Circuit Design**: Write Python code using circuit-synth
 3. **Generate KiCad**: Run the Python file to create KiCad project
-4. **Manufacturing Files**: Templates automatically generate BOM, PDF, and Gerbers
+4. **Manufacturing Files**: Templates automatically generate BOM and PDF
 5. **Validate**: Open in KiCad and verify the design
 
 ## 📚 Quick Reference
@@ -336,13 +318,11 @@ component[1] += vcc
 # All templates automatically generate manufacturing files:
 circuit_obj.generate_bom(project_name="my_project")          # BOM CSV
 circuit_obj.generate_pdf_schematic(project_name="my_project")  # PDF schematic
-circuit_obj.generate_gerbers(project_name="my_project")      # Gerber files
 ```
 
 **Output:**
 - BOM: `my_project/my_project_bom.csv`
 - PDF: `my_project/my_project_schematic.pdf`
-- Gerbers: `my_project/gerbers/` (ready for JLCPCB, PCBWay, etc.)
 
 ---
 

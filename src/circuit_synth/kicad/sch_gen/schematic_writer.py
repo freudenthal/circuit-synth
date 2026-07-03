@@ -355,19 +355,19 @@ class SchematicWriter:
         # CRITICAL DEBUG: Log hierarchical path for UUID fix verification
         import sys
 
-        print(
-            f"\n🔍 WRITER_INIT: Circuit='{circuit.name}'", file=sys.stderr, flush=True
+        logger.debug(
+            f"\n🔍 WRITER_INIT: Circuit='{circuit.name}'"
         )
-        print(
+        logger.debug(
             f"🔍 WRITER_INIT:   Hierarchical path={self.hierarchical_path}",
             file=sys.stderr,
             flush=True,
         )
-        print(
-            f"🔍 WRITER_INIT:   Self UUID={self.uuid_top}", file=sys.stderr, flush=True
+        logger.debug(
+            f"🔍 WRITER_INIT:   Self UUID={self.uuid_top}"
         )
         if self.hierarchical_path and len(self.hierarchical_path) > 0:
-            print(
+            logger.debug(
                 f"🔍 WRITER_INIT:   Root UUID (path[0])={self.hierarchical_path[0]}",
                 file=sys.stderr,
                 flush=True,
@@ -803,26 +803,26 @@ class SchematicWriter:
         """
         import sys
 
-        print("=" * 80, file=sys.stderr, flush=True)
-        print(
+        logger.debug("=" * 80)
+        logger.debug(
             "🔤 TEXT-FLOW PLACEMENT _place_components() called!",
             file=sys.stderr,
             flush=True,
         )
-        print("=" * 80, file=sys.stderr, flush=True)
+        logger.debug("=" * 80)
 
         if not self.schematic.components:
             logger.debug("No components to place")
-            print("⚠️  No components to place!", file=sys.stderr, flush=True)
+            logger.debug("⚠️  No components to place!")
             return
 
         start_time = time.perf_counter()
-        print(
+        logger.debug(
             f"🚀 PLACE_COMPONENTS: Starting placement of {len(self.schematic.components)} components",
             file=sys.stderr,
             flush=True,
         )
-        print(
+        logger.debug(
             f"🔤 PLACE_COMPONENTS: Using text-flow placement algorithm",
             file=sys.stderr,
             flush=True,
@@ -833,14 +833,14 @@ class SchematicWriter:
         logger.info(f"🔤 PLACE_COMPONENTS: Using text-flow placement algorithm")
 
         # Print current positions
-        print("\n🔍 Component positions before placement:")
+        logger.debug("\n🔍 Component positions before placement:")
         for comp in self.schematic.components:
-            print(f"  {comp.reference}: ({comp.position.x:.1f}, {comp.position.y:.1f})")
+            logger.debug(f"  {comp.reference}: ({comp.position.x:.1f}, {comp.position.y:.1f})")
 
         # Use text-flow placement for ALL components (ignore existing positions)
         components_needing_placement = list(self.schematic.components)
 
-        print(
+        logger.debug(
             f"\n📊 Components to place with text-flow: {len(components_needing_placement)}"
         )
 
@@ -881,7 +881,7 @@ class SchematicWriter:
                     # Calculate accurate bounding box including pin labels for proper collision detection
                     import sys
 
-                    print(
+                    logger.debug(
                         f"\n🔍 PLACEMENT: About to calculate bbox for {placement_key} ({comp.lib_id})",
                         file=sys.stderr,
                         flush=True,
@@ -893,7 +893,7 @@ class SchematicWriter:
                     )
                     width = max_x - min_x
                     height = max_y - min_y
-                    print(
+                    logger.debug(
                         f"🔍 PLACEMENT: Calculated bbox for {placement_key}: {width:.2f} x {height:.2f} mm",
                         file=sys.stderr,
                         flush=True,
@@ -907,7 +907,7 @@ class SchematicWriter:
                 hasattr(self.circuit, "child_instances")
                 and self.circuit.child_instances
             ):
-                print(f"\n📄 Found {len(self.circuit.child_instances)} sheets to place")
+                logger.debug(f"\n📄 Found {len(self.circuit.child_instances)} sheets to place")
                 logger.debug(
                     f"Found {len(self.circuit.child_instances)} sheets to place"
                 )
@@ -945,7 +945,7 @@ class SchematicWriter:
                         sheet_width = max(min_width, name_width)
                         bbox_width = sheet_width + label_width
 
-                        print(
+                        logger.debug(
                             f"🔍 PLACEMENT: Sheet {sub_name}: sheet={sheet_width:.1f}mm, labels={label_width:.1f}mm, bbox={bbox_width:.1f}x{sheet_height:.1f}mm"
                         )
                         logger.debug(
@@ -1003,7 +1003,7 @@ class SchematicWriter:
                         x, y = placement_map[sheet_ref]
                         child["x"] = x
                         child["y"] = y
-                        print(
+                        logger.debug(
                             f"📄 Placed sheet {child['sub_name']} at ({x:.1f}, {y:.1f})"
                         )
                         logger.debug(
@@ -2029,19 +2029,19 @@ class SchematicWriter:
         # Check if labels are available
         import sys
 
-        print(
-            f"\n🔍 BBOX: Checking for labels in schematic", file=sys.stderr, flush=True
+        logger.debug(
+            f"\n🔍 BBOX: Checking for labels in schematic"
         )
         if hasattr(self.schematic, "labels"):
-            print(
+            logger.debug(
                 f"🔍 BBOX: ✅ Has labels, count: {len(self.schematic.labels)}",
                 file=sys.stderr,
                 flush=True,
             )
             for i, label in enumerate(self.schematic.labels[:10]):
-                print(f"🔍 BBOX:   Label[{i}]: {label}", file=sys.stderr, flush=True)
+                logger.debug(f"🔍 BBOX:   Label[{i}]: {label}")
         else:
-            print(f"🔍 BBOX: ❌ No labels attribute", file=sys.stderr, flush=True)
+            logger.debug(f"🔍 BBOX: ❌ No labels attribute")
 
         # Use schematic components (with updated positions) instead of circuit components
         for comp in self.schematic.components:
@@ -2057,7 +2057,7 @@ class SchematicWriter:
                 from .symbol_geometry import SymbolBoundingBoxCalculator
 
                 # Calculate component bbox including pin labels for accurate collision detection
-                print(
+                logger.debug(
                     f"\n🔍 BBOX: Calculating bbox for {comp.reference} at ({comp.position.x:.3f}, {comp.position.y:.3f})",
                     file=sys.stderr,
                     flush=True,
@@ -2069,7 +2069,7 @@ class SchematicWriter:
                     )
                 )
 
-                print(
+                logger.debug(
                     f"🔍 BBOX: Base component bbox: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
                     file=sys.stderr,
                     flush=True,
@@ -2119,13 +2119,13 @@ class SchematicWriter:
                             min_x = min(min_x, label_rel_x - 2.54)
                             max_x = max(max_x, label_rel_x + 2.54)
 
-                        print(
+                        logger.debug(
                             f"🔍 BBOX:   Label '{label.text}' ({len(label.text)} chars, {label.rotation}°) at rel ({label_rel_x:.2f}, {label_rel_y:.2f})",
                             file=sys.stderr,
                             flush=True,
                         )
 
-                print(
+                logger.debug(
                     f"🔍 BBOX: Final bbox with labels: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
                     file=sys.stderr,
                     flush=True,
