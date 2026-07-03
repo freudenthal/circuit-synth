@@ -178,10 +178,15 @@ def test_json_loaded_circuit_generates_power_symbols():
             'hierarchical_label "VCC"' not in content
         ), "VCC should NOT generate hierarchical label"
 
-        # Verify regular SIGNAL net still uses hierarchical label
+        # SIGNAL is a signal net that is internal to this single (flat) sheet.
+        # After the local-vs-hierarchical label fix (PRs #608/#612), sheet-internal
+        # nets are emitted as LOCAL labels, not hierarchical ones. It must still be
+        # a plain label (not a power symbol).
+        assert '(label "SIGNAL"' in content, "SIGNAL should generate a local label"
         assert (
-            'hierarchical_label "SIGNAL"' in content
-        ), "SIGNAL should generate hierarchical label"
+            'hierarchical_label "SIGNAL"' not in content
+        ), "SIGNAL is sheet-internal, so it uses a local label, not a hierarchical one"
+        assert 'lib_id "power:SIGNAL"' not in content, "SIGNAL is not a power net"
 
         # Verify power symbols have #PWR references
         pwr_refs = re.findall(r'reference "#PWR\d+"', content)
