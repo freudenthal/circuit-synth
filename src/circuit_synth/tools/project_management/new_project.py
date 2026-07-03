@@ -38,271 +38,97 @@ console = Console()
 def create_claude_directory_from_templates(
     project_path: Path, developer_mode: bool = False
 ) -> None:
-    """Create a complete .claude directory structure using templates and agent registry
+    """Install the project's AI tooling from the packaged example_project template.
+
+    Copies the ``.claude/`` tree (skills / agents / commands), the ``.mcp.json``
+    MCP-server config, and the ``tools/`` helpers into the new project. This
+    packaged template is the single source of truth and works for both editable
+    and wheel installs.
 
     Args:
         project_path: Target project directory
-        developer_mode: If True, includes contributor agents and dev commands
+        developer_mode: If True, keep contributor agents and dev commands
     """
+    circuit_synth_dir = Path(__file__).parent.parent.parent  # -> circuit_synth/
+    template_root = circuit_synth_dir / "data" / "templates" / "example_project"
+    template_claude_dir = template_root / ".claude"
     dest_claude_dir = project_path / ".claude"
-    dest_claude_dir.mkdir(exist_ok=True)
 
-    console.print(
-        "🤖 Setting up Claude Code integration from templates...", style="blue"
-    )
+    console.print("🤖 Setting up Claude Code integration from template...", style="blue")
+
+    if not template_claude_dir.exists():
+        # This is a packaging bug, not normal operation: the installed
+        # circuit-synth is missing its bundled template data.
+        console.print(
+            f"⚠️  PACKAGING ERROR: template .claude not found at "
+            f"{template_claude_dir}. The installed circuit-synth is missing its "
+            f"packaged template data (data/templates/example_project/.claude).",
+            style="red",
+        )
+        dest_claude_dir.mkdir(parents=True, exist_ok=True)
+        return
 
     try:
-        # Find the template directory
-        circuit_synth_dir = Path(
-            __file__
-        ).parent.parent.parent  # Get to circuit_synth directory
-        template_claude_dir = (
-            circuit_synth_dir / "data" / "templates" / "example_project" / ".claude"
-        )
+        # 1. Copy the .claude tree (skills / agents / commands).
+        if dest_claude_dir.exists():
+            shutil.rmtree(dest_claude_dir)
+        shutil.copytree(template_claude_dir, dest_claude_dir)
 
-        if template_claude_dir.exists():
-            console.print(
-                f"📋 Copying templates from {template_claude_dir}", style="blue"
-            )
+        # 2. Copy sibling helpers that belong at the project root.
+        mcp_src = template_root / ".mcp.json"
+        if mcp_src.exists():
+            shutil.copy2(mcp_src, project_path / ".mcp.json")
+        tools_src = template_root / "tools"
+        if tools_src.is_dir():
+            dest_tools = project_path / "tools"
+            if dest_tools.exists():
+                shutil.rmtree(dest_tools)
+            shutil.copytree(tools_src, dest_tools)
 
-            # Copy the entire template .claude directory structure
-            if dest_claude_dir.exists():
-                shutil.rmtree(dest_claude_dir)
-            shutil.copytree(template_claude_dir, dest_claude_dir)
+        # 3. Developer-mode filtering: end users don't get dev-only material.
+        if not developer_mode:
+            for sub in ("commands/development", "commands/setup", "agents/development"):
+                d = dest_claude_dir / sub
+                if d.exists():
+                    shutil.rmtree(d)
 
-            # Handle developer mode filtering
-            commands_dir = dest_claude_dir / "commands"
-            agents_dir = dest_claude_dir / "agents"
-
-            if not developer_mode:
-                # Remove dev commands (not needed for end users)
-                dev_commands_to_remove = [
-                    "development/dev-release-pypi.md",
-                    "development/dev-review-branch.md",
-                    "development/dev-review-repo.md",
-                    "development/dev-run-tests.md",
-                    "development/dev-update-and-commit.md",
-                ]
-                # Remove setup commands directory entirely for end users
-                setup_dir = commands_dir / "setup"
-                if setup_dir.exists():
-                    shutil.rmtree(setup_dir)
-
-                # Remove development commands directory for end users
-                dev_commands_dir = commands_dir / "development"
-                if dev_commands_dir.exists():
-                    shutil.rmtree(dev_commands_dir)
-
-                for cmd_file in dev_commands_to_remove:
-                    cmd_path = commands_dir / cmd_file
-                    if cmd_path.exists():
-                        cmd_path.unlink()
-
-                # Remove development agents (not needed for end users)
-                dev_agents_to_remove = [
-                    "development/contributor.md",
-                    "development/first_setup_agent.md",
-                    "development/circuit_generation_agent.md",
-                ]
-                for agent_file in dev_agents_to_remove:
-                    agent_path = agents_dir / agent_file
-                    if agent_path.exists():
-                        agent_path.unlink()
-
-                # Remove development agents directory if empty
-                dev_agents_dir = agents_dir / "development"
-                if dev_agents_dir.exists() and not any(dev_agents_dir.iterdir()):
-                    dev_agents_dir.rmdir()
-
-            console.print("✅ Copied complete template structure", style="green")
-
-        else:
-            console.print(
-                "⚠️  Template directory not found, using basic setup", style="yellow"
-            )
-            # Fallback: just register agents
-            register_circuit_agents()
-
-        # Also register agents to update with any newer agent definitions
-        register_circuit_agents()
-
-        # Hooks removed - they caused more problems than they solved
-        console.print("✅ Clean environment setup (no hooks)", style="green")
-
-        # Remove mcp_settings.json as it's not needed for user projects
+        # 4. Internal-only file, never shipped to user projects.
         mcp_settings_file = dest_claude_dir / "mcp_settings.json"
         if mcp_settings_file.exists():
             mcp_settings_file.unlink()
 
-        # Count what was created
+        # 5. Report exactly what installed.
+        skills_count = len(list((dest_claude_dir / "skills").rglob("SKILL.md")))
         agents_count = len(list((dest_claude_dir / "agents").rglob("*.md")))
         commands_count = len(list((dest_claude_dir / "commands").rglob("*.md")))
-
+        console.print(f"🧠 Skills available: {skills_count}", style="green")
         console.print(f"📁 Agents available: {agents_count}", style="green")
         console.print(f"🔧 Commands available: {commands_count}", style="green")
-
-        console.print(
-            "✅ Created Claude directory structure with templates", style="green"
-        )
         console.print(
             f"📁 Created project-local .claude in {dest_claude_dir}", style="blue"
         )
+        if (project_path / ".mcp.json").exists():
+            console.print(
+                "💡 Enable schematic MCP tools with: uv add mcp-kicad-sch-api",
+                style="cyan",
+            )
 
     except Exception as e:
         console.print(
-            f"⚠️  Could not create complete Claude setup: {str(e)}", style="yellow"
+            f"⚠️  Could not install Claude setup from template: {e}", style="yellow"
         )
-        # Fall back to basic agent registration
-        register_circuit_agents()
 
 
 def copy_complete_claude_setup(
     project_path: Path, developer_mode: bool = False
 ) -> None:
-    """Copy the complete .claude directory from circuit-synth to new project
+    """Install the project's .claude setup, MCP config, and tool helpers.
 
-    Args:
-        project_path: Target project directory
-        developer_mode: If True, includes contributor agents and dev commands
+    Thin wrapper over :func:`create_claude_directory_from_templates`, which reads
+    from the packaged example_project template (the only source that works for
+    both editable and wheel installs).
     """
-
-    # Find the circuit-synth root directory (where we have the complete .claude setup)
-    circuit_synth_root = Path(__file__).parent.parent.parent.parent
-    source_claude_dir = circuit_synth_root / ".claude"
-
-    if not source_claude_dir.exists():
-        console.print(
-            "⚠️  Source .claude directory not found - using template-based setup",
-            style="yellow",
-        )
-        # Use template-based approach to create complete .claude directory
-        create_claude_directory_from_templates(project_path, developer_mode)
-        return
-
-    # Destination .claude directory in the new project
-    dest_claude_dir = project_path / ".claude"
-
-    console.print(f"📋 Copying Claude setup from {source_claude_dir}", style="blue")
-    if developer_mode:
-        console.print(
-            "🔧 Developer mode: Including contributor agents and dev tools",
-            style="cyan",
-        )
-
-    try:
-        # Copy the entire .claude directory structure
-        if dest_claude_dir.exists():
-            shutil.rmtree(dest_claude_dir)
-        shutil.copytree(source_claude_dir, dest_claude_dir)
-
-        # Remove mcp_settings.json as it's not needed for user projects
-        mcp_settings_file = dest_claude_dir / "mcp_settings.json"
-        if mcp_settings_file.exists():
-            mcp_settings_file.unlink()
-
-        # Handle commands and agents based on mode
-        commands_dir = dest_claude_dir / "commands"
-        agents_dir = dest_claude_dir / "agents"
-
-        if not developer_mode:
-            # Remove dev commands (not needed for end users)
-            dev_commands_to_remove = [
-                "dev-release-pypi.md",
-                "dev-review-branch.md",
-                "dev-review-repo.md",
-                "dev-run-tests.md",
-                "dev-update-and-commit.md",
-            ]
-            # Remove setup commands directory entirely for end users
-            setup_dir = commands_dir / "setup"
-            if setup_dir.exists():
-                shutil.rmtree(setup_dir)
-
-            for cmd_file in dev_commands_to_remove:
-                cmd_path = commands_dir / cmd_file
-                if cmd_path.exists():
-                    cmd_path.unlink()
-
-            # Remove development agents (not needed for end users)
-            dev_agents_to_remove = [
-                "development/contributor.md",
-                "development/first_setup_agent.md",
-                "development/circuit_generation_agent.md",
-            ]
-            for agent_file in dev_agents_to_remove:
-                agent_path = agents_dir / agent_file
-                if agent_path.exists():
-                    agent_path.unlink()
-
-        else:
-            console.print("✅ Keeping all developer tools and agents", style="green")
-
-        console.print("✅ Copied all agents and commands", style="green")
-
-        # Hooks removed - they caused more problems than they solved
-        console.print("✅ Clean environment setup (no hooks)", style="green")
-
-        # Count what was copied (now includes subdirectories)
-        agents_count = len(list((dest_claude_dir / "agents").rglob("*.md")))
-        commands_count = len(list((dest_claude_dir / "commands").rglob("*.md")))
-
-        console.print(f"📁 Agents available: {agents_count}", style="green")
-        console.print(f"🔧 Commands available: {commands_count}", style="green")
-
-        # List key agents by category
-        circuit_agents = []
-        manufacturing_agents = []
-        development_agents = []
-        quality_agents = []
-
-        for agent_file in (dest_claude_dir / "agents").rglob("*.md"):
-            agent_name = agent_file.stem
-            if "circuit" in agent_file.parent.name:
-                circuit_agents.append(agent_name)
-            elif "manufacturing" in agent_file.parent.name:
-                manufacturing_agents.append(agent_name)
-            elif "development" in agent_file.parent.name:
-                development_agents.append(agent_name)
-            elif "quality" in agent_file.parent.name:
-                quality_agents.append(agent_name)
-
-        if circuit_agents:
-            console.print(
-                f"🔌 Circuit agents: {', '.join(circuit_agents)}", style="cyan"
-            )
-        if manufacturing_agents:
-            console.print(
-                f"🏭 Manufacturing agents: {', '.join(manufacturing_agents)}",
-                style="cyan",
-            )
-        if quality_agents:
-            console.print(
-                f"✅ Quality agents: {', '.join(quality_agents)}", style="cyan"
-            )
-        if development_agents and developer_mode:
-            console.print(
-                f"🔧 Development agents: {', '.join(development_agents)}", style="cyan"
-            )
-
-        # List some key commands
-        key_commands = ["find-symbol", "find-footprint", "jlc-search"]
-        if developer_mode:
-            key_commands.extend(["dev-run-tests", "dev-review-branch"])
-
-        available_commands = [
-            f.stem for f in (dest_claude_dir / "commands").rglob("*.md")
-        ]
-        found_key_commands = [cmd for cmd in key_commands if cmd in available_commands]
-
-        if found_key_commands:
-            console.print(
-                f"⚡ Key commands: /{', /'.join(found_key_commands)}", style="cyan"
-            )
-
-    except Exception as e:
-        console.print(f"⚠️  Could not copy .claude directory: {e}", style="yellow")
-        console.print("🔄 Falling back to basic agent registration", style="yellow")
-        register_circuit_agents()
+    create_claude_directory_from_templates(project_path, developer_mode)
 
 
 def check_kicad_installation() -> Dict[str, Any]:

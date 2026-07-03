@@ -218,8 +218,15 @@ pdf_result = circuit_obj.generate_pdf_schematic(project_name="my_project")
         if config.include_agents:
             readme += """## 🤖 AI-Powered Design with Claude Code
 
-This project is set up for AI-assisted circuit design with Claude Code.
-See the `.claude/` directory for any installed skills.
+This project ships Claude Code helpers for circuit design:
+
+- **`design-circuit` skill** — describe a circuit in natural language and let
+  Claude write the circuit-synth Python, generate the KiCad schematic, simulate,
+  and refine it (`.claude/skills/design-circuit/`).
+- **`tools/find_symbol.py`** — look up exact KiCad symbol/footprint ids:
+  `uv run python tools/find_symbol.py <query> [--footprints]`.
+- **kicad-sch-api MCP server** (optional) — enable with
+  `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
 
 """
 
@@ -281,7 +288,15 @@ This project includes the following circuit templates:
         if config.include_agents:
             claude_md += """## ⚡ AI Tooling
 
-See the `.claude/` directory in this project for any installed skills.
+This project ships these Claude Code helpers:
+
+- **`design-circuit` skill** (`.claude/skills/design-circuit/`) — iterative loop
+  to design a circuit from a prompt: write circuit-synth Python, generate the
+  KiCad schematic, simulate, and refine.
+- **`tools/find_symbol.py`** — resolve exact KiCad `Lib:Symbol` / footprint ids:
+  `uv run python tools/find_symbol.py <query> [--footprints]`.
+- **kicad-sch-api MCP server** (optional) — direct schematic tools; enable with
+  `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
 
 """
 

@@ -169,6 +169,11 @@ circuit_synth = [
     "data/templates/example_project/**/**/**/*",
     # Explicitly include hidden files in .claude directory
     "data/templates/example_project/.claude/**/*",
+    "data/templates/example_project/.claude/skills/*/*.md",
+    # Dot-files and tool helpers are NOT matched by the **/* globs above
+    # (setuptools glob does not match leading-dot names), so list them explicitly.
+    "data/templates/example_project/.mcp.json",
+    "data/templates/example_project/tools/*.py",
     # Explicitly include Python source files in circuit-synth directory
     "data/templates/example_project/circuit-synth/*.py",
     "data/templates/project_template/*",
