@@ -74,7 +74,12 @@ class SpiceConverter:
 
     def _add_components(self):
         """Add circuit-synth components to SPICE circuit."""
-        for component in self.circuit.components:
+        # circuit.components is a dict {ref: component}; iterating it directly
+        # yields refs (strings), so pull the component objects out explicitly.
+        components = self.circuit.components
+        if hasattr(components, "values"):
+            components = components.values()
+        for component in components:
             self._add_component(component)
 
     def _add_component(self, component):

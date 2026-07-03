@@ -33,6 +33,45 @@ try:
                 logger.debug(f"Set ngspice library path: {path}")
                 break
 
+    # Auto-configure ngspice library path on Windows using KiCad's bundled DLL.
+    # KiCad ships ngspice.dll (and its codemodels) under
+    # <ProgramFiles>\KiCad\<version>\bin\ngspice.dll, so no separate ngspice
+    # install is needed. Verified against KiCad 10.0 (ngspice 46).
+    elif platform.system() == "Windows":
+        import re as _re
+        from pathlib import Path as _Path
+
+        _roots = [
+            _Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "KiCad",
+            _Path(
+                os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            )
+            / "KiCad",
+        ]
+        _versioned = []
+        for _root in _roots:
+            if _root.is_dir():
+                for _child in _root.iterdir():
+                    if _child.is_dir() and _re.fullmatch(
+                        r"\d+(?:\.\d+)*", _child.name
+                    ):
+                        _versioned.append(
+                            (tuple(int(p) for p in _child.name.split(".")), _child)
+                        )
+        for _, _ver_dir in sorted(_versioned, reverse=True):
+            _dll = _ver_dir / "bin" / "ngspice.dll"
+            if _dll.exists():
+                # Let ngspice.dll's own dependencies resolve from KiCad's bin dir.
+                os.add_dll_directory(str(_dll.parent))
+                NgSpiceShared.LIBRARY_PATH = str(_dll)
+                # Point ngspice at its codemodels (analog.cm, etc.) if present so
+                # AC/transient/behavioral sources work later; harmless if absent.
+                _cm_dir = _ver_dir / "lib" / "ngspice"
+                if _cm_dir.is_dir():
+                    os.environ.setdefault("SPICE_LIB_DIR", str(_cm_dir))
+                logger.debug(f"Set ngspice library path: {_dll}")
+                break
+
 except ImportError as e:
     PYSPICE_AVAILABLE = False
     logger.warning(f"PySpice not available: {e}")
