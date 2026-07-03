@@ -225,6 +225,9 @@ This project ships Claude Code helpers for circuit design:
   and refine it (`.claude/skills/design-circuit/`).
 - **`tools/find_symbol.py`** — look up exact KiCad symbol/footprint ids:
   `uv run python tools/find_symbol.py <query> [--footprints]`.
+- **`tools/simulate_example.py`** — known-good SPICE reference: runs a DC
+  operating-point analysis via ngspice (auto-uses KiCad's bundled `ngspice.dll`
+  on Windows). Copy its pattern to verify your own circuit's node voltages.
 - **kicad-sch-api MCP server** (optional) — enable with
   `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
 
@@ -295,6 +298,9 @@ This project ships these Claude Code helpers:
   KiCad schematic, simulate, and refine.
 - **`tools/find_symbol.py`** — resolve exact KiCad `Lib:Symbol` / footprint ids:
   `uv run python tools/find_symbol.py <query> [--footprints]`.
+- **`tools/simulate_example.py`** — known-good SPICE reference (DC operating
+  point via ngspice; auto-uses KiCad's bundled `ngspice.dll` on Windows). Copy
+  its pattern to verify node voltages: `circuit.simulate().operating_point()`.
 - **kicad-sch-api MCP server** (optional) — direct schematic tools; enable with
   `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
 

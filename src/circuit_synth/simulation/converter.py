@@ -391,8 +391,10 @@ class SpiceConverter:
                 if voltage:
                     power_nets.append((getattr(net, "name", str(net)), voltage))
             elif "VIN" in net_name or "VSUPPLY" in net_name:
-                # Default supply voltage for VIN
-                power_nets.append((getattr(net, "name", str(net)), 5.0))
+                # Use a voltage embedded in the net name (e.g. VIN_9V -> 9 V),
+                # falling back to 5 V for a bare VIN with no number.
+                voltage = self._extract_voltage_from_net_name(net_name) or 5.0
+                power_nets.append((getattr(net, "name", str(net)), voltage))
 
         # Add voltage sources
         for i, (net_name, voltage) in enumerate(power_nets):
