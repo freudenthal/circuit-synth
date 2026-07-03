@@ -211,7 +211,7 @@ if __name__ == "__main__":
     print("Open ../kicad/{project_name.replace(' ', '_')}.kicad_pcb in KiCad to see the ratsnest!")
 '''
 
-    with open(circuit_synth_dir / "main.py", "w") as f:
+    with open(circuit_synth_dir / "main.py", "w", encoding="utf-8") as f:
         f.write(main_py_content)
 
     console.print(
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     print("📖 See README.md for next steps")
 '''
 
-    with open(circuit_synth_dir / "main.py", "w") as f:
+    with open(circuit_synth_dir / "main.py", "w", encoding="utf-8") as f:
         f.write(main_py_content)
 
 
@@ -365,7 +365,7 @@ Use the slash commands in ./commands/ for quick tasks:
 - **/analyze-design**: Analyze circuit design and suggest improvements
 """
 
-    with open(claude_dir / "instructions.md", "w") as f:
+    with open(claude_dir / "instructions.md", "w", encoding="utf-8") as f:
         f.write(instructions_content)
 
     if example_claude_dir.exists():
@@ -448,7 +448,7 @@ This PCB has a dedicated Claude AI agent configured for:
 - Design review and optimization suggestions
 """
 
-    with open(project_path / "README.md", "w") as f:
+    with open(project_path / "README.md", "w", encoding="utf-8") as f:
         f.write(readme_content)
 
     console.print("✅ Created integration README.md", style="green")

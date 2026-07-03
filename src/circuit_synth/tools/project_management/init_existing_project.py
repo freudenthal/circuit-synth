@@ -459,7 +459,7 @@ def convert_kicad_to_circuit_synth(kicad_project_path: Path, target_dir: Path) -
                 main_circuit, kicad_project_path.stem
             )
             main_py_path = target_dir / "circuit-synth" / "main.py"
-            with open(main_py_path, "w") as f:
+            with open(main_py_path, "w", encoding="utf-8") as f:
                 f.write(python_code)
 
         console.print(
@@ -550,7 +550,7 @@ def generate_hierarchical_circuit_synth_code(
 
         # Generate subcircuit Python code with mapped names
         subcircuit_code = generate_subcircuit_code(subcircuit, name, function_name)
-        with open(subcircuit_path, "w") as f:
+        with open(subcircuit_path, "w", encoding="utf-8") as f:
             f.write(subcircuit_code)
 
         # Determine if this should be top-level or embedded
@@ -609,7 +609,7 @@ def generate_hierarchical_circuit_synth_code(
         main_circuit, project_name, subcircuit_imports, subcircuit_calls
     )
     main_py_path = target_dir / "circuit-synth" / "main.py"
-    with open(main_py_path, "w") as f:
+    with open(main_py_path, "w", encoding="utf-8") as f:
         f.write(main_code)
 
     console.print(f"   ✅ Generated main.py with proper hierarchical structure")
@@ -621,7 +621,7 @@ def update_esp32_with_embedded_circuits(
     """Update the ESP32 subcircuit file to include embedded circuits"""
 
     # Read the current ESP32 file
-    with open(esp32_path, "r") as f:
+    with open(esp32_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     # Add imports after the existing imports
@@ -662,7 +662,7 @@ def update_esp32_with_embedded_circuits(
         content = "\n".join(lines)
 
     # Write the updated content back
-    with open(esp32_path, "w") as f:
+    with open(esp32_path, "w", encoding="utf-8") as f:
         f.write(content)
 
     console.print(f"   ✅ Updated esp32c6.py with embedded circuits")
@@ -1034,7 +1034,7 @@ if __name__ == "__main__":
 '''
 
     main_py_path = target_dir / "circuit-synth" / "main.py"
-    with open(main_py_path, "w") as f:
+    with open(main_py_path, "w", encoding="utf-8") as f:
         f.write(template_code)
 
     console.print(f"✅ Basic template created: {main_py_path}", style="green")
@@ -1178,10 +1178,10 @@ Ask for specific improvements:
 """
 
     # Write files
-    with open(target_dir / "README.md", "w") as f:
+    with open(target_dir / "README.md", "w", encoding="utf-8") as f:
         f.write(readme_content)
 
-    with open(target_dir / "CLAUDE.md", "w") as f:
+    with open(target_dir / "CLAUDE.md", "w", encoding="utf-8") as f:
         f.write(claude_md_content)
 
     console.print("✅ Project documentation created", style="green")

@@ -43,6 +43,15 @@ import uuid as uuid_module
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Version stamped into generated .kicad_sch files. Derived from installed
+# package metadata so it never goes stale; falls back if metadata is missing.
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _GENERATOR_VERSION = _pkg_version("circuit-synth")
+except Exception:
+    _GENERATOR_VERSION = "0.12.1"
+
 log_level = os.environ.get("CIRCUIT_SYNTH_LOG_LEVEL", "WARNING")
 try:
     level = getattr(logging, log_level.upper())
@@ -309,7 +318,7 @@ class SchematicWriter:
             name=self.project_name,
             version="20250114",
             generator="circuit_synth",
-            generator_version="0.8.36",
+            generator_version=_GENERATOR_VERSION,
             paper=self.paper_size,
             uuid=self.uuid_top,
         )

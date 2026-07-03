@@ -840,18 +840,29 @@ class APISynchronizer:
             True if label removed successfully
         """
         try:
+            # Power-symbol labels (PowerSymbolLabel) have no uuid; there is
+            # nothing to remove by uuid, so skip quietly instead of raising
+            # AttributeError (which was logged as an ERROR on every regen).
+            label_uuid = getattr(label, "uuid", None)
+            if label_uuid is None:
+                logger.debug(
+                    f"Label '{getattr(label, 'text', '?')}' has no uuid "
+                    f"(type={type(label).__name__}); skipping removal"
+                )
+                return False
+
             # Use the appropriate removal method based on label type
             if label_type == "hierarchical":
-                removed = self.schematic.remove_hierarchical_label(label.uuid)
+                removed = self.schematic.remove_hierarchical_label(label_uuid)
             else:
-                removed = self.schematic.remove_label(label.uuid)
+                removed = self.schematic.remove_label(label_uuid)
 
             if removed:
                 logger.info(f"Removed {label_type} label '{label.text}' from {component_ref} pin {pin_number}")
                 report.labels_removed.append((component_ref, pin_number, label.text))
                 return True
             else:
-                logger.warning(f"Label {label.uuid} not found for removal")
+                logger.warning(f"Label {label_uuid} not found for removal")
                 return False
 
         except Exception as e:
