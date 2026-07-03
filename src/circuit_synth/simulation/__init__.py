@@ -26,7 +26,7 @@ Example Usage:
 """
 
 from .analysis import ACAnalysis, DCAnalysis, TransientAnalysis
-from .converter import SpiceConverter
+from .converter import SimulationValidationError, SpiceConverter
 from .manufacturer_models import ManufacturerModels, get_manufacturer_models
 from .models import ModelLibrary, SpiceModel, get_model_library
 from .simulator import CircuitSimulator, SimulationResult
@@ -40,6 +40,7 @@ __all__ = [
     "CircuitSimulator",
     "SimulationResult",
     "SpiceConverter",
+    "SimulationValidationError",
     "DCAnalysis",
     "ACAnalysis",
     "TransientAnalysis",

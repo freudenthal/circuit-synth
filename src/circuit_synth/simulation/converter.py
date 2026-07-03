@@ -20,6 +20,21 @@ except ImportError:
     PYSPICE_AVAILABLE = False
 
 
+class SimulationValidationError(ValueError):
+    """Raised when a circuit cannot be safely simulated.
+
+    Carries the full list of problems (``.problems``) so the caller sees every
+    issue at once, rather than discovering them one ngspice crash at a time. This
+    replaces the old behaviour where unknown components were silently skipped,
+    yielding a wrong-but-"successful" simulation.
+    """
+
+    def __init__(self, problems):
+        self.problems = list(problems)
+        body = "\n".join(f"  - {p}" for p in self.problems)
+        super().__init__(f"circuit is not valid for simulation:\n{body}")
+
+
 class SpiceConverter:
     """Converts circuit-synth circuits to PySpice format."""
 
@@ -33,10 +48,22 @@ class SpiceConverter:
         # second, conflicting supply on a net an explicit source already drives.
         self.driven_nets = set()
 
-    def convert(self) -> "SpiceCircuit":
-        """Convert circuit-synth circuit to PySpice circuit."""
+    def convert(self, strict: bool = True) -> "SpiceCircuit":
+        """Convert circuit-synth circuit to PySpice circuit.
+
+        Args:
+            strict: When True (default), validate the circuit first and raise
+                ``SimulationValidationError`` if anything would produce a
+                wrong-but-"successful" simulation (unknown component, floating
+                node, no source, under-connected op-amp). When False, fall back to
+                the lenient path that warns and skips unknown components -- useful
+                for exploratory conversion of partial circuits.
+        """
         if not PYSPICE_AVAILABLE:
             raise ImportError("PySpice not available")
+
+        if strict:
+            self.validate()
 
         # Create PySpice circuit
         circuit_name = getattr(self.circuit, "name", "Circuit")
@@ -86,47 +113,70 @@ class SpiceConverter:
         for component in components:
             self._add_component(component)
 
+    @staticmethod
+    def _classify(symbol: str) -> Optional[str]:
+        """Map a KiCad symbol to a SPICE primitive kind, or None if unrecognized.
+
+        Single source of truth shared by ``_add_component`` (dispatch) and
+        ``validate`` (so validation and conversion never disagree about what is
+        simulatable). Source checks come before the op-amp heuristic so a source
+        symbol is never misclassified. Explicit SPICE sources use KiCad's real
+        Simulation_SPICE library (VDC/VSIN/IDC/...); "Device:V"/"Device:I" are
+        exact aliases (not real KiCad symbols but referenced by docs/testbench) --
+        matched exactly so they do not also swallow "Device:Varistor".
+        """
+        if not symbol:
+            return None
+        if "Device:R" in symbol:
+            return "resistor"
+        if "Device:C" in symbol:
+            return "capacitor"
+        if "Device:L" in symbol:
+            return "inductor"
+        if "Device:D" in symbol or "Diode:" in symbol:
+            return "diode"
+        if (
+            symbol.startswith("Simulation_SPICE:V")
+            or "Reference_Voltage:" in symbol
+            or symbol == "Device:V"
+        ):
+            return "voltage_source"
+        if (
+            symbol.startswith("Simulation_SPICE:I")
+            or "Reference_Current:" in symbol
+            or symbol == "Device:I"
+        ):
+            return "current_source"
+        if any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
+            return "opamp"
+        if "Transistor_BJT:" in symbol or "Device:Q" in symbol:
+            return "bjt"
+        if "Transistor_FET:" in symbol or "Device:M" in symbol:
+            return "mosfet"
+        return None
+
     def _add_component(self, component):
         """Add a single component to the SPICE circuit."""
         symbol = getattr(component, "symbol", "")
         ref = getattr(component, "ref", "X")
         value = getattr(component, "value", None)
 
-        # Determine component type from symbol.
-        # Source checks come before the op-amp heuristic so a source symbol can
-        # never be misclassified. Explicit SPICE sources use KiCad's real
-        # Simulation_SPICE library (VDC/VSIN/IDC/...); "Device:V"/"Device:I" are
-        # accepted as exact aliases (they are not real KiCad symbols, but the docs
-        # and testbench generator reference them). "Device:V" is matched exactly so
-        # it does not also swallow "Device:Varistor".
-        if "Device:R" in symbol:
-            self._add_resistor(component, ref, value)
-        elif "Device:C" in symbol:
-            self._add_capacitor(component, ref, value)
-        elif "Device:L" in symbol:
-            self._add_inductor(component, ref, value)
-        elif "Device:D" in symbol or "Diode:" in symbol:
-            self._add_diode(component, ref, value)
-        elif (
-            symbol.startswith("Simulation_SPICE:V")
-            or "Reference_Voltage:" in symbol
-            or symbol == "Device:V"
-        ):
-            self._add_voltage_source(component, ref, value)
-        elif (
-            symbol.startswith("Simulation_SPICE:I")
-            or "Reference_Current:" in symbol
-            or symbol == "Device:I"
-        ):
-            self._add_current_source(component, ref, value)
-        elif any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
-            self._add_opamp(component, ref, value)
-        elif "Transistor_BJT:" in symbol or "Device:Q" in symbol:
-            self._add_bjt_transistor(component, ref, value)
-        elif "Transistor_FET:" in symbol or "Device:M" in symbol:
-            self._add_mosfet(component, ref, value)
-        else:
+        handlers = {
+            "resistor": self._add_resistor,
+            "capacitor": self._add_capacitor,
+            "inductor": self._add_inductor,
+            "diode": self._add_diode,
+            "voltage_source": self._add_voltage_source,
+            "current_source": self._add_current_source,
+            "opamp": self._add_opamp,
+            "bjt": self._add_bjt_transistor,
+            "mosfet": self._add_mosfet,
+        }
+        handler = handlers.get(self._classify(symbol))
+        if handler is None:
             logger.warning(f"Unknown component type: {symbol} - skipping")
+            return
+        handler(component, ref, value)
 
     def _add_resistor(self, component, ref: str, value: str):
         """Add resistor to SPICE circuit."""
@@ -467,21 +517,9 @@ class SpiceConverter:
             # node / fight the real source).
             if orig_name in self.driven_nets:
                 continue
-            net_name = orig_name.upper()
-
-            # Detect power supply nets
-            if any(
-                pattern in net_name
-                for pattern in ["VCC", "VDD", "V+", "+5V", "+3V3", "+12V"]
-            ):
-                voltage = self._extract_voltage_from_net_name(net_name)
-                if voltage:
-                    power_nets.append((getattr(net, "name", str(net)), voltage))
-            elif "VIN" in net_name or "VSUPPLY" in net_name:
-                # Use a voltage embedded in the net name (e.g. VIN_9V -> 9 V),
-                # falling back to 5 V for a bare VIN with no number.
-                voltage = self._extract_voltage_from_net_name(net_name) or 5.0
-                power_nets.append((getattr(net, "name", str(net)), voltage))
+            voltage = self._heuristic_source_voltage(orig_name)
+            if voltage is not None:
+                power_nets.append((orig_name, voltage))
 
         # Add voltage sources
         for i, (net_name, voltage) in enumerate(power_nets):
@@ -510,3 +548,150 @@ class SpiceConverter:
                     continue
 
         return None
+
+    def _heuristic_source_voltage(self, net_name: str) -> Optional[float]:
+        """Voltage the net-name heuristic would assign to this net, or None.
+
+        Single source of truth shared by ``_add_power_sources`` (which actually
+        injects the supply) and ``validate`` (which must know whether a
+        single-connection net will nonetheless be driven). A bare ``VCC`` with no
+        embedded number is *not* driven (no voltage to assign); ``VIN``/``VSUPPLY``
+        default to 5 V.
+        """
+        upper = net_name.upper()
+        if any(p in upper for p in ["VCC", "VDD", "V+", "+5V", "+3V3", "+12V"]):
+            return self._extract_voltage_from_net_name(upper)
+        if "VIN" in upper or "VSUPPLY" in upper:
+            return self._extract_voltage_from_net_name(upper) or 5.0
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Validation                                                          #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _attr(obj, name, default=None):
+        """Read an attribute from either a live object or a dict-shaped one."""
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _iter_components(self):
+        comps = getattr(self.circuit, "components", None)
+        if comps is None:
+            return []
+        return list(comps.values()) if hasattr(comps, "values") else list(comps)
+
+    def _iter_nets(self):
+        nets = getattr(self.circuit, "nets", None)
+        if nets is None:
+            return []
+        return list(nets.values()) if hasattr(nets, "values") else list(nets)
+
+    @staticmethod
+    def _is_ground_name(name: str) -> bool:
+        return str(name).upper() in ("GND", "GROUND", "VSS", "0")
+
+    @staticmethod
+    def _net_pin_count(net) -> Optional[int]:
+        """Number of pins on a net, or None if the net can't report it."""
+        pins = getattr(net, "pins", None)
+        if pins is None:
+            return None
+        try:
+            return len(pins)
+        except TypeError:
+            return None
+
+    def _connected_pin_count(self, component) -> Optional[int]:
+        """Number of a component's pins attached to a net, or None if unknown."""
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        return sum(
+            1 for pin in pin_map.values() if getattr(pin, "net", None) is not None
+        )
+
+    def _all_driven_net_names(self) -> set:
+        """Nets that will carry a source: explicit source components + heuristic rails."""
+        driven = set()
+        for component in self._iter_components():
+            if self._classify(self._attr(component, "symbol", "")) in (
+                "voltage_source",
+                "current_source",
+            ):
+                driven |= self._component_net_names(component)
+        for net in self._iter_nets():
+            name = self._attr(net, "name", None) or str(net)
+            if self._heuristic_source_voltage(name) is not None:
+                driven.add(name)
+        return driven
+
+    def validate(self) -> None:
+        """Check the circuit is safe to simulate; raise with every problem found.
+
+        Catches the failure modes that otherwise produce a wrong-but-"successful"
+        simulation or an opaque ngspice error:
+
+        * a component whose symbol has no SPICE mapping (was silently skipped);
+        * a net with a single connection that no source drives (floating node ->
+          singular matrix);
+        * no source at all (nothing to excite the circuit);
+        * an op-amp with fewer than three connected pins (needs in+, in-, out).
+
+        Checks that need data a dict/JSON-shaped circuit can't provide (live pin
+        maps, net pin counts) are skipped for those inputs rather than raising
+        false positives.
+        """
+        problems = []
+
+        # 1. Every component must map to a known SPICE primitive.
+        for component in self._iter_components():
+            symbol = self._attr(component, "symbol", "")
+            ref = self._attr(component, "ref", None) or "?"
+            if self._classify(symbol) is None:
+                problems.append(
+                    f"{ref}: unrecognized symbol '{symbol}' has no SPICE mapping "
+                    f"(would be silently skipped)"
+                )
+
+        driven = self._all_driven_net_names()
+
+        # 2. There must be some excitation.
+        if not driven:
+            problems.append(
+                "no voltage or current source found (declare a "
+                "Simulation_SPICE:VDC/VAC, or use a rail-named net); simulation "
+                "would have no excitation"
+            )
+
+        # 3. No floating nodes: every net needs >=2 connections, ground, or a source.
+        for net in self._iter_nets():
+            name = self._attr(net, "name", None) or str(net)
+            if self._is_ground_name(name) or name in driven:
+                continue
+            count = self._net_pin_count(net)
+            if count is None:
+                continue  # can't tell (dict/JSON net) -> don't block
+            if count < 2:
+                problems.append(
+                    f"net '{name}' has {count} connection(s); needs >=2 or a source "
+                    f"(floating node)"
+                )
+
+        # 4. Op-amps need at least their three signal pins connected.
+        for component in self._iter_components():
+            if self._classify(self._attr(component, "symbol", "")) != "opamp":
+                continue
+            count = self._connected_pin_count(component)
+            if count is None:
+                continue
+            if count < 3:
+                ref = self._attr(component, "ref", None) or "?"
+                problems.append(
+                    f"{ref}: op-amp needs >=3 connected pins (in+, in-, out), "
+                    f"found {count}"
+                )
+
+        if problems:
+            raise SimulationValidationError(problems)
