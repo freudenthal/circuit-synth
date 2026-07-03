@@ -248,6 +248,32 @@ class SymbolLibCache:
         """
         return cls._parse_kicad_symbol_dirs()
 
+    @staticmethod
+    def _versioned_symbol_dirs() -> List[Path]:
+        """Discover versioned KiCad symbol dirs, newest version first.
+
+        KiCad 10+ installs under a version-numbered directory (e.g.
+        ``C:\\Program Files\\KiCad\\10.0\\share\\kicad\\symbols`` on Windows or
+        ``~/.local/share/kicad/10.0/symbols`` on Linux). Version numbers are
+        globbed rather than hardcoded so future releases are found automatically.
+        """
+        from ..core.power_net_registry import _sorted_kicad_version_dirs
+
+        roots = [
+            Path.home() / ".local" / "share" / "kicad",
+            Path.home() / "Library" / "Application Support" / "kicad",
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "KiCad",
+            Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "KiCad",
+        ]
+        dirs: List[Path] = []
+        for root in roots:
+            for versioned in _sorted_kicad_version_dirs(root):
+                # Linux/macOS layout: <root>/<ver>/symbols
+                dirs.append(versioned / "symbols")
+                # Windows install layout: <PF>/KiCad/<ver>/share/kicad/symbols
+                dirs.append(versioned / "share" / "kicad" / "symbols")
+        return dirs
+
     @classmethod
     def _parse_kicad_symbol_dirs(cls) -> List[Path]:
         """
@@ -277,14 +303,19 @@ class SymbolLibCache:
                 else:
                     logger.warning(f"Skipping invalid symbol directory: {path_obj}")
         else:
-            # Try common KiCad installation paths as fallback
+            # Try common KiCad installation paths as fallback. Versioned install
+            # roots (KiCad 10 lives under e.g. C:\Program Files\KiCad\10.0\...)
+            # are discovered dynamically and preferred (newest first) so new
+            # KiCad releases work without hardcoding version numbers.
             common_paths = [
+                str(p) for p in cls._versioned_symbol_dirs()
+            ] + [
                 "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",  # macOS
                 "/usr/share/kicad/symbols",  # Linux (KiCad 6+)
                 "/usr/share/kicad/library",  # Linux (KiCad 5)
                 "/usr/local/share/kicad/symbols",  # Linux alternative
                 "/usr/local/share/kicad/library",  # Linux alternative (KiCad 5)
-                "C:\\Program Files\\KiCad\\share\\kicad\\symbols",  # Windows
+                "C:\\Program Files\\KiCad\\share\\kicad\\symbols",  # Windows (unversioned)
                 "C:\\Program Files (x86)\\KiCad\\share\\kicad\\symbols",  # Windows 32-bit
             ]
 

@@ -664,7 +664,7 @@ This project uses these KiCad symbol libraries:
 **Happy circuit designing!** 🎛️
 """
 
-    with open(project_path / "README.md", "w") as f:
+    with open(project_path / "README.md", "w", encoding="utf-8") as f:
         f.write(readme_content)
 
     console.print(f"✅ Created project README.md", style="green")
@@ -809,7 +809,7 @@ def power_supply():
 """
 
     claude_md_file = project_path / "CLAUDE.md"
-    with open(claude_md_file, "w") as f:
+    with open(claude_md_file, "w", encoding="utf-8") as f:
         f.write(claude_md_content)
 
     console.print(f"✅ Created project CLAUDE.md", style="green")
@@ -963,12 +963,12 @@ def main(
 
     readme_content = readme_gen.generate(config, project_path)
     readme_path = project_path / "README.md"
-    readme_path.write_text(readme_content)
+    readme_path.write_text(readme_content, encoding="utf-8")
     console.print("✅ Created README.md", style="green")
 
     claude_md_content = claude_md_gen.generate(config)
     claude_md_path = project_path / "CLAUDE.md"
-    claude_md_path.write_text(claude_md_content)
+    claude_md_path.write_text(claude_md_content, encoding="utf-8")
     console.print("✅ Created CLAUDE.md", style="green")
 
     # Step 8: KiCad plugins note (if KiCad is installed)
