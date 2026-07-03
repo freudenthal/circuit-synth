@@ -360,8 +360,6 @@ class SchematicWriter:
         )
         logger.debug(
             f"WRITER_INIT:   Hierarchical path={self.hierarchical_path}",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug(
             f"WRITER_INIT:   Self UUID={self.uuid_top}"
@@ -369,8 +367,6 @@ class SchematicWriter:
         if self.hierarchical_path and len(self.hierarchical_path) > 0:
             logger.debug(
                 f"WRITER_INIT:   Root UUID (path[0])={self.hierarchical_path[0]}",
-                file=sys.stderr,
-                flush=True,
             )
 
     @staticmethod
@@ -874,8 +870,6 @@ class SchematicWriter:
         logger.debug("=" * 80)
         logger.debug(
             "TEXT-FLOW PLACEMENT _place_components() called!",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug("=" * 80)
 
@@ -887,13 +881,9 @@ class SchematicWriter:
         start_time = time.perf_counter()
         logger.debug(
             f"PLACE_COMPONENTS: Starting placement of {len(self.schematic.components)} components",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug(
             f"PLACE_COMPONENTS: Using text-flow placement algorithm",
-            file=sys.stderr,
-            flush=True,
         )
         logger.info(
             f"PLACE_COMPONENTS: Starting placement of {len(self.schematic.components)} components"
@@ -2181,8 +2171,6 @@ class SchematicWriter:
         if hasattr(self.schematic, "labels"):
             logger.debug(
                 f"BBOX: Has labels, count: {len(self.schematic.labels)}",
-                file=sys.stderr,
-                flush=True,
             )
             for i, label in enumerate(self.schematic.labels[:10]):
                 logger.debug(f"BBOX:   Label[{i}]: {label}")
@@ -2205,8 +2193,6 @@ class SchematicWriter:
                 # Calculate component bbox including pin labels for accurate collision detection
                 logger.debug(
                     f"\nBBOX: Calculating bbox for {comp.reference} at ({comp.position.x:.3f}, {comp.position.y:.3f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
 
                 min_x, min_y, max_x, max_y = (
@@ -2217,8 +2203,6 @@ class SchematicWriter:
 
                 logger.debug(
                     f"BBOX: Base component bbox: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
 
                 # Extend bbox to include all nearby hierarchical labels
@@ -2267,14 +2251,10 @@ class SchematicWriter:
 
                         logger.debug(
                             f"BBOX:   Label '{label.text}' ({len(label.text)} chars, {label.rotation}°) at rel ({label_rel_x:.2f}, {label_rel_y:.2f})",
-                            file=sys.stderr,
-                            flush=True,
                         )
 
                 logger.debug(
                     f"BBOX: Final bbox with labels: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
 
                 # TODO: Create Rectangle using API types

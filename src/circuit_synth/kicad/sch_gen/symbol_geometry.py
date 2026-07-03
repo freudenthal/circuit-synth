@@ -124,13 +124,9 @@ class SymbolBoundingBoxCalculator:
 
         logger.debug(
             f"After geometry processing: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug(
             f"  Width: {max_x - min_x:.2f}, Height: {max_y - min_y:.2f}",
-            file=sys.stderr,
-            flush=True,
         )
 
         # Add small margin for text that might extend beyond shapes
@@ -171,13 +167,9 @@ class SymbolBoundingBoxCalculator:
 
         logger.debug(
             f"FINAL BBOX: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug(
             f"  Width: {max_x - min_x:.2f}, Height: {max_y - min_y:.2f}",
-            file=sys.stderr,
-            flush=True,
         )
         logger.debug("=" * 50 + "\n")
 
@@ -341,8 +333,6 @@ class SymbolBoundingBoxCalculator:
 
             logger.debug(
                 f"    label_width={name_width:.2f}, label_height={name_height:.2f} (len={len(label_text)})",
-                file=sys.stderr,
-                flush=True,
             )
 
             # Adjust bounds based on pin orientation
@@ -355,32 +345,24 @@ class SymbolBoundingBoxCalculator:
                 label_x = end_x - offset - name_width
                 logger.debug(
                     f"    Angle 0 (Right pin): min_x {min_x:.2f} -> {label_x:.2f} (offset={offset:.3f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
                 min_x = min(min_x, label_x)
             elif angle == 180:  # Pin points left - label extends RIGHT from endpoint
                 label_x = end_x + offset + name_width
                 logger.debug(
                     f"    Angle 180 (Left pin): max_x {max_x:.2f} -> {label_x:.2f} (offset={offset:.3f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
                 max_x = max(max_x, label_x)
             elif angle == 90:  # Pin points up - label extends DOWN from endpoint
                 label_y = end_y - offset - name_height
                 logger.debug(
                     f"    Angle 90 (Up pin): min_y {min_y:.2f} -> {label_y:.2f} (offset={offset:.3f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
                 min_y = min(min_y, label_y)
             elif angle == 270:  # Pin points down - label extends UP from endpoint
                 label_y = end_y + offset + name_height
                 logger.debug(
                     f"    Angle 270 (Down pin): max_y {max_y:.2f} -> {label_y:.2f} (offset={offset:.3f})",
-                    file=sys.stderr,
-                    flush=True,
                 )
                 max_y = max(max_y, label_y)
 
@@ -402,7 +384,5 @@ class SymbolBoundingBoxCalculator:
 
         logger.debug(
             f"    Pin bounds: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})",
-            file=sys.stderr,
-            flush=True,
         )
         return (min_x, min_y, max_x, max_y)
