@@ -28,6 +28,10 @@ class SpiceConverter:
         self.spice_circuit = None
         self.voltage_sources = []
         self.node_map = {}
+        # Nets driven by an explicit source component (Device:V, Simulation_SPICE:V*,
+        # ...). _add_power_sources skips these so the net-name heuristic never adds a
+        # second, conflicting supply on a net an explicit source already drives.
+        self.driven_nets = set()
 
     def convert(self) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit."""
@@ -88,7 +92,13 @@ class SpiceConverter:
         ref = getattr(component, "ref", "X")
         value = getattr(component, "value", None)
 
-        # Determine component type from symbol
+        # Determine component type from symbol.
+        # Source checks come before the op-amp heuristic so a source symbol can
+        # never be misclassified. Explicit SPICE sources use KiCad's real
+        # Simulation_SPICE library (VDC/VSIN/IDC/...); "Device:V"/"Device:I" are
+        # accepted as exact aliases (they are not real KiCad symbols, but the docs
+        # and testbench generator reference them). "Device:V" is matched exactly so
+        # it does not also swallow "Device:Varistor".
         if "Device:R" in symbol:
             self._add_resistor(component, ref, value)
         elif "Device:C" in symbol:
@@ -97,16 +107,24 @@ class SpiceConverter:
             self._add_inductor(component, ref, value)
         elif "Device:D" in symbol or "Diode:" in symbol:
             self._add_diode(component, ref, value)
+        elif (
+            symbol.startswith("Simulation_SPICE:V")
+            or "Reference_Voltage:" in symbol
+            or symbol == "Device:V"
+        ):
+            self._add_voltage_source(component, ref, value)
+        elif (
+            symbol.startswith("Simulation_SPICE:I")
+            or "Reference_Current:" in symbol
+            or symbol == "Device:I"
+        ):
+            self._add_current_source(component, ref, value)
         elif any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
             self._add_opamp(component, ref, value)
         elif "Transistor_BJT:" in symbol or "Device:Q" in symbol:
             self._add_bjt_transistor(component, ref, value)
         elif "Transistor_FET:" in symbol or "Device:M" in symbol:
             self._add_mosfet(component, ref, value)
-        elif "Reference_Voltage:" in symbol or "Device:V" in symbol:
-            self._add_voltage_source(component, ref, value)
-        elif "Reference_Current:" in symbol or "Device:I" in symbol:
-            self._add_current_source(component, ref, value)
         else:
             logger.warning(f"Unknown component type: {symbol} - skipping")
 
@@ -239,11 +257,14 @@ class SpiceConverter:
 
         # Add to list of voltage sources for tracking
         self.voltage_sources.append(ref)
+        # Mark this source's nets so the net-name heuristic won't double-drive them.
+        self.driven_nets.update(self._component_net_names(component))
 
-        # Add voltage source (positive, negative, voltage)
+        # Add voltage source. nodes[] is in pin-number order, so nodes[0] is pin 1
+        # (KiCad Sim.Pins "1=+") and nodes[1] is pin 2 ("2=-"): V(name, +, -, value).
         self.spice_circuit.V(ref, nodes[0], nodes[1], voltage)
         logger.debug(
-            f"Added voltage source {ref}: {nodes[0]} -> {nodes[1]} = {voltage}V"
+            f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {voltage}V"
         )
 
     def _add_current_source(self, component, ref: str, value: str):
@@ -257,15 +278,75 @@ class SpiceConverter:
 
         # Parse current value
         current = self._convert_value_to_spice(value or "1mA", "I")
+        # Mark this source's nets so the net-name heuristic won't double-drive them.
+        self.driven_nets.update(self._component_net_names(component))
 
-        # Add current source (positive, negative, current)
+        # Add current source. nodes[] is pin-number ordered (pin 1 = +, pin 2 = -);
+        # ngspice current flows from + node, through the source, to the - node.
         self.spice_circuit.I(ref, nodes[0], nodes[1], current)
         logger.debug(
             f"Added current source {ref}: {nodes[0]} -> {nodes[1]} = {current}A"
         )
 
+    @staticmethod
+    def _pin_sort_key(num):
+        """Sort key that orders pin numbers numerically ('2' < '10') when possible."""
+        s = str(num)
+        return (0, int(s)) if s.isdigit() else (1, s)
+
+    def _component_net_names(self, component) -> set:
+        """Original (unmapped) net names connected to a component's pins.
+
+        Best effort: only available for live Component objects that carry a
+        ``_pins`` map. Returns an empty set for dict/JSON-shaped components.
+        """
+        names = set()
+        pin_map = getattr(component, "_pins", None)
+        if isinstance(pin_map, dict):
+            for pin in pin_map.values():
+                net = getattr(pin, "net", None)
+                name = getattr(net, "name", None)
+                if name:
+                    names.add(name)
+        return names
+
     def _get_component_nodes(self, component) -> List[str]:
-        """Get the SPICE nodes connected to a component."""
+        """Get the SPICE nodes connected to a component, in pin-number order.
+
+        Pin order is significant: a voltage/current source's pin 1 is + and pin 2
+        is - (KiCad ``Sim.Pins "1=+ 2=-"``), and a transistor's pins are C/B/E or
+        D/G/S. A live Component exposes a ``{pin_num: Pin}`` map, so we read the
+        node for each pin in ascending pin-number order. Unlike the legacy net
+        scan this does *not* dedupe or alphabetically sort, so polarity and
+        terminal order are preserved.
+
+        Falls back to the legacy net scan for dict/JSON-shaped circuits whose
+        components have no live ``_pins`` map.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if isinstance(pin_map, dict) and pin_map:
+            ordered = []
+            for _num, pin in sorted(
+                pin_map.items(), key=lambda kv: self._pin_sort_key(kv[0])
+            ):
+                net = getattr(pin, "net", None)
+                net_name = getattr(net, "name", None)
+                if net_name is None:
+                    continue  # unconnected pin
+                ordered.append(self.node_map.get(net_name, net_name))
+            if ordered:
+                return ordered
+            # else: fall through to the net scan (e.g. pins present but netless)
+
+        return self._get_component_nodes_by_net_scan(component)
+
+    def _get_component_nodes_by_net_scan(self, component) -> List[str]:
+        """Legacy fallback: recover a component's nodes by scanning nets.
+
+        Used for dict/JSON-shaped circuits without live Pin objects. Nodes are
+        alphabetically sorted (pin order is not recoverable here), which is fine
+        for symmetric R/C/L but does not guarantee polarity for sources.
+        """
         nodes = []
 
         # Get component connections from the circuit
@@ -380,7 +461,13 @@ class SpiceConverter:
             return
 
         for net in nets_to_process:
-            net_name = getattr(net, "name", str(net)).upper()
+            orig_name = getattr(net, "name", str(net))
+            # An explicit source component already drives this net; don't add a
+            # second heuristic supply on top of it (that would over-constrain the
+            # node / fight the real source).
+            if orig_name in self.driven_nets:
+                continue
+            net_name = orig_name.upper()
 
             # Detect power supply nets
             if any(
