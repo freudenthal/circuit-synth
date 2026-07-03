@@ -90,7 +90,7 @@ class TextFlowPlacer:
             ValueError: If components don't fit on A3 sheet
         """
         logger.debug(f"\n{'='*80}")
-        logger.debug(f"🔤 TEXT-FLOW PLACEMENT ALGORITHM")
+        logger.debug(f"TEXT-FLOW PLACEMENT ALGORITHM")
         logger.debug(f"{'='*80}")
         logger.debug(f"Components to place: {len(component_bboxes)}")
         logger.debug(f"Spacing: {self.spacing}mm\n")
@@ -105,11 +105,11 @@ class TextFlowPlacer:
             placements, success = self._try_place_on_sheet(component_bboxes, sheet)
 
             if success:
-                logger.debug(f"✅ All components fit on {sheet.name}!")
+                logger.debug(f"All components fit on {sheet.name}!")
                 logger.debug(f"{'='*80}\n")
                 return placements, sheet.name
             else:
-                logger.debug(f"❌ Overflow on {sheet.name}, trying next size...\n")
+                logger.debug(f"Overflow on {sheet.name}, trying next size...\n")
 
         # If we get here, even A3 overflowed
         raise ValueError(
@@ -171,7 +171,7 @@ class TextFlowPlacer:
             # Check if component fits on sheet vertically
             if bbox_y + height > sheet.max_y:
                 logger.debug(
-                    f"  ⚠️  Component {ref} overflows at y={bbox_y:.1f}mm (max={sheet.max_y:.1f}mm)"
+                    f"  Component {ref} overflows at y={bbox_y:.1f}mm (max={sheet.max_y:.1f}mm)"
                 )
                 return placements, False
 

@@ -192,46 +192,46 @@ if __name__ == "__main__":
         generate_pcb=False,
     )
 
-    print("✅ STM32F411 minimal circuit generated!")
-    print("📁 Open in KiCad: stm32_minimal/stm32_minimal.kicad_pro")
+    print("STM32F411 minimal circuit generated!")
+    print("Open in KiCad: stm32_minimal/stm32_minimal.kicad_pro")
     print()
 
     # Generate manufacturing files (BOM and PDF)
-    print("📦 Generating manufacturing files...")
+    print("Generating manufacturing files...")
     print()
 
     # Generate BOM for component ordering
     bom_result = circuit_obj.generate_bom(project_name="stm32_minimal")
     if bom_result["success"]:
-        print(f"✅ BOM generated: {bom_result['file']}")
+        print(f"BOM generated: {bom_result['file']}")
         print(f"   Components: {bom_result['component_count']}")
     else:
-        print(f"⚠️  BOM generation failed: {bom_result.get('error')}")
+        print(f"BOM generation failed: {bom_result.get('error')}")
     print()
 
     # Generate PDF schematic for documentation
     pdf_result = circuit_obj.generate_pdf_schematic(project_name="stm32_minimal")
     if pdf_result["success"]:
-        print(f"✅ PDF schematic generated: {pdf_result['file']}")
+        print(f"PDF schematic generated: {pdf_result['file']}")
     else:
-        print(f"⚠️  PDF generation failed: {pdf_result.get('error')}")
+        print(f"PDF generation failed: {pdf_result.get('error')}")
     print()
 
     # NOTE: Gerber/PCB export is not available in this build (licensed feature
     # of upstream circuit-synth). Tracked as a wishlist item in TODO.md.
     print()
 
-    print("📊 Circuit Features:")
+    print("Circuit Features:")
     print("   • STM32F411CEU6 (100MHz Cortex-M4)")
     print("   • 8MHz external crystal")
     print("   • SWD programming interface")
     print("   • Boot from flash configuration")
     print()
-    print("🔧 Programming:")
+    print("Programming:")
     print("   Use ST-Link V2 or similar SWD programmer")
     print("   Connect: VCC, GND, SWDIO, SWCLK")
     print()
-    print("💡 Next Steps:")
+    print("Next Steps:")
     print("   • Add USB connector for USB programming/communication")
     print("   • Add voltage regulator for 5V→3.3V")
     print("   • Add reset button")

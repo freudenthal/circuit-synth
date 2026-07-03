@@ -116,7 +116,7 @@ class READMEGenerator:
 
 A circuit-synth project for PCB design with Python.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Run your circuit
@@ -129,7 +129,7 @@ This will generate KiCad project files that you can open in KiCad.
 
         # Add section about included circuits
         if config.has_circuits():
-            readme += f"""## 📁 Included Circuits ({len(config.circuits)})
+            readme += f"""## Included Circuits ({len(config.circuits)})
 
 This project includes the following circuit templates:
 
@@ -142,7 +142,7 @@ This project includes the following circuit templates:
             readme += "\nYou can run any circuit file independently or use them as reference for your own designs.\n\n"
 
         # Add circuit-synth basics
-        readme += """## 🏗️ Circuit-Synth Basics
+        readme += """## Circuit-Synth Basics
 
 ### Creating Components
 
@@ -207,7 +207,7 @@ pdf_result = circuit_obj.generate_pdf_schematic(project_name="my_project")
 """
 
         # Add documentation links
-        readme += """## 📖 Documentation
+        readme += """## Documentation
 
 - Circuit-Synth: https://circuit-synth.readthedocs.io
 - KiCad: https://docs.kicad.org
@@ -216,7 +216,7 @@ pdf_result = circuit_obj.generate_pdf_schematic(project_name="my_project")
 
         # Add Claude agents section if included
         if config.include_agents:
-            readme += """## 🤖 AI-Powered Design with Claude Code
+            readme += """## AI-Powered Design with Claude Code
 
 This project ships Claude Code helpers for circuit design:
 
@@ -234,14 +234,14 @@ This project ships Claude Code helpers for circuit design:
 """
 
         # Add next steps
-        readme += """## 🚀 Next Steps
+        readme += """## Next Steps
 
 1. Open `circuit-synth/main.py` and review the base circuit
 2. Run the circuit to generate KiCad files
 3. Open the generated `.kicad_pro` file in KiCad
 4. Modify the circuit or create your own designs
 
-**Happy circuit designing!** 🎛️
+**Happy circuit designing!**
 """
 
         return readme
@@ -264,7 +264,7 @@ class CLAUDEMDGenerator:
 
 Project-specific guidance for Claude Code when working with this circuit-synth project.
 
-## 🚀 Project Overview
+## Project Overview
 
 This is a **circuit-synth project** for PCB design with Python code.
 
@@ -272,7 +272,7 @@ This is a **circuit-synth project** for PCB design with Python code.
 
         # Add info about included circuits
         if config.has_circuits():
-            claude_md += f"""## 📝 Included Circuits ({len(config.circuits)})
+            claude_md += f"""## Included Circuits ({len(config.circuits)})
 
 This project includes the following circuit templates:
 
@@ -289,7 +289,7 @@ This project includes the following circuit templates:
 
         # Add available tools
         if config.include_agents:
-            claude_md += """## ⚡ AI Tooling
+            claude_md += """## AI Tooling
 
 This project ships these Claude Code helpers:
 
@@ -307,7 +307,7 @@ This project ships these Claude Code helpers:
 """
 
         # Add workflow guidance
-        claude_md += """## 🔧 Development Workflow
+        claude_md += """## Development Workflow
 
 1. **Component Selection**: Find KiCad symbols/footprints (browse
    `<KiCad>/share/kicad/symbols` or use the KiCad symbol editor)
@@ -316,7 +316,7 @@ This project ships these Claude Code helpers:
 4. **Manufacturing Files**: Templates automatically generate BOM and PDF
 5. **Validate**: Open in KiCad and verify the design
 
-## 📚 Quick Reference
+## Quick Reference
 
 ### Component Creation
 ```python
@@ -347,7 +347,7 @@ circuit_obj.generate_pdf_schematic(project_name="my_project")  # PDF schematic
 
 ---
 
-**This project is optimized for AI-powered circuit design with Claude Code!** 🎛️
+**This project is optimized for AI-powered circuit design with Claude Code!**
 """
 
         return claude_md

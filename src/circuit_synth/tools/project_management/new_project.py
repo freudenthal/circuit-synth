@@ -54,13 +54,13 @@ def create_claude_directory_from_templates(
     template_claude_dir = template_root / ".claude"
     dest_claude_dir = project_path / ".claude"
 
-    console.print("🤖 Setting up Claude Code integration from template...", style="blue")
+    console.print("Setting up Claude Code integration from template...", style="blue")
 
     if not template_claude_dir.exists():
         # This is a packaging bug, not normal operation: the installed
         # circuit-synth is missing its bundled template data.
         console.print(
-            f"⚠️  PACKAGING ERROR: template .claude not found at "
+            f"PACKAGING ERROR: template .claude not found at "
             f"{template_claude_dir}. The installed circuit-synth is missing its "
             f"packaged template data (data/templates/example_project/.claude).",
             style="red",
@@ -101,21 +101,21 @@ def create_claude_directory_from_templates(
         skills_count = len(list((dest_claude_dir / "skills").rglob("SKILL.md")))
         agents_count = len(list((dest_claude_dir / "agents").rglob("*.md")))
         commands_count = len(list((dest_claude_dir / "commands").rglob("*.md")))
-        console.print(f"🧠 Skills available: {skills_count}", style="green")
-        console.print(f"📁 Agents available: {agents_count}", style="green")
-        console.print(f"🔧 Commands available: {commands_count}", style="green")
+        console.print(f"Skills available: {skills_count}", style="green")
+        console.print(f"Agents available: {agents_count}", style="green")
+        console.print(f"Commands available: {commands_count}", style="green")
         console.print(
-            f"📁 Created project-local .claude in {dest_claude_dir}", style="blue"
+            f"Created project-local .claude in {dest_claude_dir}", style="blue"
         )
         if (project_path / ".mcp.json").exists():
             console.print(
-                "💡 Enable schematic MCP tools with: uv add mcp-kicad-sch-api",
+                "Enable schematic MCP tools with: uv add mcp-kicad-sch-api",
                 style="cyan",
             )
 
     except Exception as e:
         console.print(
-            f"⚠️  Could not install Claude setup from template: {e}", style="yellow"
+            f"Could not install Claude setup from template: {e}", style="yellow"
         )
 
 
@@ -133,35 +133,35 @@ def copy_complete_claude_setup(
 
 def check_kicad_installation() -> Dict[str, Any]:
     """Check KiCad installation and return path info (cross-platform)"""
-    console.print("🔍 Checking KiCad installation...", style="yellow")
+    console.print("Checking KiCad installation...", style="yellow")
 
     try:
         result = validate_kicad_installation()
 
         # Check if KiCad CLI is available (main requirement)
         if result.get("cli_available", False):
-            console.print("✅ KiCad found!", style="green")
-            console.print(f"   🔧 CLI Path: {result.get('cli_path', 'Unknown')}")
-            console.print(f"   📦 Version: {result.get('cli_version', 'Unknown')}")
+            console.print("KiCad found!", style="green")
+            console.print(f"   CLI Path: {result.get('cli_path', 'Unknown')}")
+            console.print(f"   Version: {result.get('cli_version', 'Unknown')}")
 
             # Check libraries
             if result.get("libraries_available", False):
                 console.print(
-                    f"   📚 Symbol libraries: {result.get('symbol_path', 'Not found')}"
+                    f"   Symbol libraries: {result.get('symbol_path', 'Not found')}"
                 )
                 console.print(
-                    f"   👟 Footprint libraries: {result.get('footprint_path', 'Not found')}"
+                    f"   Footprint libraries: {result.get('footprint_path', 'Not found')}"
                 )
             else:
                 console.print(
-                    "   ⚠️  Libraries not found but CLI available", style="yellow"
+                    "   Libraries not found but CLI available", style="yellow"
                 )
 
             result["kicad_installed"] = True
             return result
         else:
-            console.print("❌ KiCad not found", style="red")
-            console.print("📥 Install options:", style="cyan")
+            console.print("KiCad not found", style="red")
+            console.print("Install options:", style="cyan")
 
             # Cross-platform installation suggestions
             if sys.platform == "darwin":  # macOS
@@ -181,7 +181,7 @@ def check_kicad_installation() -> Dict[str, Any]:
             return result
 
     except Exception as e:
-        console.print(f"⚠️  Could not verify KiCad installation: {e}", style="yellow")
+        console.print(f"Could not verify KiCad installation: {e}", style="yellow")
         return {"kicad_installed": False, "error": str(e)}
 
 
@@ -207,13 +207,13 @@ def copy_example_project_template(project_path: Path) -> bool:
 
     if not template_dir.exists():
         console.print(
-            f"⚠️  Project template not found at {template_dir}", style="yellow"
+            f"Project template not found at {template_dir}", style="yellow"
         )
-        console.print("🔄 Falling back to basic project creation", style="yellow")
+        console.print("Falling back to basic project creation", style="yellow")
         return False
 
     console.print(
-        f"📋 Copying complete project template from {template_dir}", style="blue"
+        f"Copying complete project template from {template_dir}", style="blue"
     )
 
     try:
@@ -223,30 +223,30 @@ def copy_example_project_template(project_path: Path) -> bool:
                 # Copy individual files
                 dest_file = project_path / item.name
                 shutil.copy2(item, dest_file)
-                console.print(f"   ✅ Copied {item.name}", style="green")
+                console.print(f"   Copied {item.name}", style="green")
             elif item.is_dir():
                 # Copy entire directories
                 dest_dir = project_path / item.name
                 if dest_dir.exists():
                     shutil.rmtree(dest_dir)
                 shutil.copytree(item, dest_dir)
-                console.print(f"   ✅ Copied {item.name}/ directory", style="green")
+                console.print(f"   Copied {item.name}/ directory", style="green")
 
-        console.print("✅ Complete project template copied successfully", style="green")
+        console.print("Complete project template copied successfully", style="green")
         console.print(
-            "   🎯 Ready-to-use ESP32-C6 development board example included!",
+            "   Ready-to-use ESP32-C6 development board example included!",
             style="cyan",
         )
         console.print(
-            "   🤖 Claude Code agents and commands included from template!",
+            "   Claude Code agents and commands included from template!",
             style="cyan",
         )
         return True
 
     except Exception as e:
-        console.print(f"⚠️  Could not copy project template: {e}", style="yellow")
+        console.print(f"Could not copy project template: {e}", style="yellow")
         console.print(
-            "🔄 Project setup will continue without template files", style="yellow"
+            "Project setup will continue without template files", style="yellow"
         )
         return False
 
@@ -305,7 +305,7 @@ def main(
             if not Confirm.ask(
                 "Continue without KiCad? (You'll need it later for opening projects)"
             ):
-                console.print("❌ Aborted - Please install KiCad first", style="red")
+                console.print("Aborted - Please install KiCad first", style="red")
                 sys.exit(1)
 
     # Step 2: Determine project configuration
@@ -313,12 +313,12 @@ def main(
 
     if quick:
         # Quick mode: use defaults, no prompts
-        console.print("[bold cyan]⚡ Quick Start Mode[/bold cyan]")
+        console.print("[bold cyan]Quick Start Mode[/bold cyan]")
         config = get_default_config()
         if developer:
             config.developer_mode = True
         console.print(
-            f"✅ Creating project with: [green]{', '.join([c.display_name for c in config.circuits])}[/green]"
+            f"Creating project with: [green]{', '.join([c.display_name for c in config.circuits])}[/green]"
         )
         console.print()
 
@@ -341,7 +341,7 @@ def main(
     claude_md_gen = CLAUDEMDGenerator()
 
     # Step 4: Create circuit-synth directory and copy all selected circuits
-    console.print("\n[bold cyan]📝 Creating Project Files...[/bold cyan]")
+    console.print("\n[bold cyan]Creating Project Files...[/bold cyan]")
 
     if config.has_circuits():
         for idx, circuit in enumerate(config.circuits):
@@ -354,27 +354,27 @@ def main(
 
                 if is_first:
                     console.print(
-                        f"✅ Created circuit-synth/main.py ({circuit.display_name})",
+                        f"Created circuit-synth/main.py ({circuit.display_name})",
                         style="green",
                     )
                 else:
                     console.print(
-                        f"✅ Created circuit-synth/{circuit.value}.py ({circuit.display_name})",
+                        f"Created circuit-synth/{circuit.value}.py ({circuit.display_name})",
                         style="green",
                     )
 
             except FileNotFoundError as e:
                 console.print(
-                    f"[yellow]⚠️  Could not add {circuit.display_name}: {e}[/yellow]"
+                    f"[yellow]Could not add {circuit.display_name}: {e}[/yellow]"
                 )
     else:
         console.print(
-            "[yellow]⚠️  No circuits selected. Creating empty project.[/yellow]"
+            "[yellow]No circuits selected. Creating empty project.[/yellow]"
         )
 
     # Step 6: Setup Claude AI agents if requested
     if config.include_agents:
-        console.print("\n[cyan]🤖 Setting up Claude Code integration...[/cyan]")
+        console.print("\n[cyan]Setting up Claude Code integration...[/cyan]")
         try:
             copy_complete_claude_setup(
                 project_path, developer_mode=config.developer_mode
@@ -386,30 +386,30 @@ def main(
                 list((project_path / ".claude" / "commands").rglob("*.md"))
             )
             console.print(
-                f"✅ Claude agents setup complete ({agents_count} agents, {commands_count} commands)",
+                f"Claude agents setup complete ({agents_count} agents, {commands_count} commands)",
                 style="green",
             )
         except Exception as e:
-            console.print(f"[yellow]⚠️  Could not setup Claude agents: {e}[/yellow]")
+            console.print(f"[yellow]Could not setup Claude agents: {e}[/yellow]")
     else:
-        console.print("\n[dim]⏭️  Skipped Claude agents setup[/dim]")
+        console.print("\n[dim]Skipped Claude agents setup[/dim]")
 
     # Step 7: Generate README.md and CLAUDE.md
-    console.print("\n[cyan]📚 Generating documentation...[/cyan]")
+    console.print("\n[cyan]Generating documentation...[/cyan]")
 
     readme_content = readme_gen.generate(config, project_path)
     readme_path = project_path / "README.md"
     readme_path.write_text(readme_content, encoding="utf-8")
-    console.print("✅ Created README.md", style="green")
+    console.print("Created README.md", style="green")
 
     claude_md_content = claude_md_gen.generate(config)
     claude_md_path = project_path / "CLAUDE.md"
     claude_md_path.write_text(claude_md_content, encoding="utf-8")
-    console.print("✅ Created CLAUDE.md", style="green")
+    console.print("Created CLAUDE.md", style="green")
 
     # Step 8: KiCad plugins note (if KiCad is installed)
     if kicad_installed:
-        console.print("\n[cyan]🔌 KiCad plugins available separately[/cyan]")
+        console.print("\n[cyan]KiCad plugins available separately[/cyan]")
         console.print(
             "[dim]   Run 'uv run cs-setup-kicad-plugins' to install AI integration plugins[/dim]"
         )
@@ -417,23 +417,23 @@ def main(
     # Success message
     console.print()
     success_text = Text(
-        f"✅ Circuit-synth project setup complete!", style="bold green"
-    ) + Text(f"\n\n📁 Location: {project_path}")
+        f"Circuit-synth project setup complete!", style="bold green"
+    ) + Text(f"\n\nLocation: {project_path}")
 
     if config.has_circuits():
         circuits_names = ", ".join([c.display_name for c in config.circuits])
         success_text += Text(
-            f"\n🎛️  Circuits ({len(config.circuits)}): {circuits_names}"
+            f"\nCircuits ({len(config.circuits)}): {circuits_names}"
         )
 
     success_text += Text(
-        f"\n\n🚀 Get started: [cyan]uv run python circuit-synth/main.py[/cyan]"
+        f"\n\nGet started: [cyan]uv run python circuit-synth/main.py[/cyan]"
     )
-    success_text += Text(f"\n📖 Documentation: See README.md")
+    success_text += Text(f"\nDocumentation: See README.md")
 
     if config.has_circuits():
         success_text += Text(
-            f"\n📦 Manufacturing: Templates auto-generate BOM and PDF"
+            f"\nManufacturing: Templates auto-generate BOM and PDF"
         )
 
     if config.include_agents:
@@ -442,10 +442,10 @@ def main(
             list((project_path / ".claude" / "commands").rglob("*.md"))
         )
         success_text += Text(
-            f"\n🤖 AI Agents: {agents_count} agents, {commands_count} commands available"
+            f"\nAI Agents: {agents_count} agents, {commands_count} commands available"
         )
 
-    console.print(Panel.fit(success_text, title="🎉 Success!", style="green"))
+    console.print(Panel.fit(success_text, title="Success!", style="green"))
 
 
 if __name__ == "__main__":
