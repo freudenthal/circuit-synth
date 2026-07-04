@@ -6,6 +6,7 @@ to SPICE netlists that can be simulated with PySpice/ngspice.
 """
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -973,11 +974,18 @@ class SpiceConverter:
         return chosen_node
 
     def _add_opamp(self, component, ref: str, value: str):
-        """Add an op-amp as an ideal VCVS: Vout = Aol * (V(in+) - V(in-)).
+        """Add an op-amp: ideal VCVS by default, 1-pole GBW macromodel when opted in.
 
         Terminals are resolved by pin function/name so the model is correct
         regardless of the symbol's pin numbering. Falls back to a positional guess
         only when no live pin map is available (dict/JSON-shaped circuits).
+
+        Without a gain-bandwidth product the op-amp is an ideal VCVS with
+        frequency-independent gain ``OPAMP_OPEN_LOOP_GAIN`` (exactly as before). With
+        a GBW -- from an explicit ``Sim.Gbw`` field, or a ModelLibrary OPAMP entry
+        whose ``value``/name carries a ``GBW`` param -- it becomes a single-pole
+        macromodel so source/feedback capacitance limits bandwidth and can peak. Slew
+        rate is out of scope (nonlinear); this models only the small-signal pole.
         """
         terminals = self._opamp_terminals(component)
         if terminals is None:
@@ -992,6 +1000,23 @@ class SpiceConverter:
         else:
             out, in_plus, in_minus = terminals
 
+        gbw_hz, tier = self._opamp_gbw(component, value)
+        if gbw_hz is None:
+            self._add_ideal_opamp(ref, out, in_plus, in_minus)
+            self.model_provenance[ref] = ResolvedModel(
+                ref=ref, kind="opamp", tier="generic", name="ideal_vcvs"
+            )
+        else:
+            self._add_gbw_opamp(ref, out, in_plus, in_minus, gbw_hz)
+            self.model_provenance[ref] = ResolvedModel(
+                ref=ref,
+                kind="opamp",
+                tier=tier,
+                name=f"gbw_1pole({self._fmt_hz(gbw_hz)})",
+            )
+
+    def _add_ideal_opamp(self, ref, out, in_plus, in_minus):
+        """Ideal op-amp: a single high-gain VCVS (unchanged legacy behaviour)."""
         gain = self.OPAMP_OPEN_LOOP_GAIN
         self.spice_circuit.VCVS(
             ref, out, self.spice_circuit.gnd, in_plus, in_minus, gain
@@ -1000,6 +1025,101 @@ class SpiceConverter:
             f"Added op-amp {ref} (ideal VCVS, gain={gain}): "
             f"out={out}, in+={in_plus}, in-={in_minus}"
         )
+
+    def _add_gbw_opamp(self, ref, out, in_plus, in_minus, gbw_hz):
+        """Single-pole GBW-limited op-amp macromodel.
+
+        ``Aol(s) = Aol0 / (1 + s/wp)`` with ``wp = 2*pi*GBW/Aol0``. Realized as a
+        high-gain VCVS (Aol0) into an R-C low-pass (``R*C = 1/wp``), then a unity
+        VCVS buffer driving the output node so the pole is unloaded by the feedback
+        network. Two internal nodes per op-amp, named from ``ref``.
+        """
+        gnd = self.spice_circuit.gnd
+        aol0 = self.OPAMP_OPEN_LOOP_GAIN
+        wp = 2.0 * math.pi * gbw_hz / aol0  # dominant-pole angular frequency
+        # Fix C, solve R for R*C = 1/wp (both stay in a numerically sane range).
+        cap = 1e-9
+        res = 1.0 / (wp * cap)
+
+        p1 = f"{ref}_p1"  # gain-stage output (before the pole)
+        p2 = f"{ref}_p2"  # after the R-C pole -> buffered to `out`
+        self.spice_circuit.VCVS(f"{ref}_a", p1, gnd, in_plus, in_minus, aol0)
+        self.spice_circuit.R(f"{ref}_p", p1, p2, res)
+        self.spice_circuit.C(f"{ref}_p", p2, gnd, cap)
+        self.spice_circuit.VCVS(f"{ref}_b", out, gnd, p2, gnd, 1.0)
+        logger.debug(
+            f"Added op-amp {ref} (1-pole GBW macromodel, GBW={self._fmt_hz(gbw_hz)}, "
+            f"Aol0={aol0}, fp={wp / (2 * math.pi):.3g} Hz): out={out}, "
+            f"in+={in_plus}, in-={in_minus}"
+        )
+
+    def _opamp_gbw(self, component, value):
+        """Resolve an op-amp's gain-bandwidth product (Hz) and provenance tier.
+
+        Explicit ``Sim.Gbw`` wins; otherwise a ``value``/name hit in the ModelLibrary
+        on an OPAMP-type model carrying a ``GBW`` param. Returns ``(gbw_hz, tier)``
+        with tier ``sim_params`` (explicit) or ``datasheet_fit`` (library), or
+        ``(None, "generic")`` when neither is present -> ideal VCVS.
+        """
+        gbw_field = self._sim_props(component).get("gbw")
+        if gbw_field is not None and str(gbw_field).strip():
+            gbw = self._parse_frequency(gbw_field)
+            if gbw and gbw > 0:
+                return gbw, "sim_params"
+            logger.warning(
+                f"Op-amp {getattr(component, 'ref', '?')}: could not parse "
+                f"Sim.Gbw '{gbw_field}'; falling back to ideal op-amp model"
+            )
+
+        name = (value or "").strip()
+        if name:
+            try:
+                from circuit_synth.simulation.models import get_model_library
+
+                model = get_model_library().models.get(name)
+            except Exception:
+                model = None
+            if (
+                model is not None
+                and str(getattr(model, "model_type", "")).upper() == "OPAMP"
+            ):
+                gbw = getattr(model, "parameters", {}).get("GBW")
+                if gbw and float(gbw) > 0:
+                    return float(gbw), "datasheet_fit"
+        return None, "generic"
+
+    @staticmethod
+    def _parse_frequency(value) -> Optional[float]:
+        """Parse a GBW/frequency string ('1.4G', '10MEG', '1k', '5e5', '2MHz') to Hz.
+
+        SI suffixes G/MEG/M/k (``M`` means mega here -- milli-Hz is meaningless for a
+        GBW), optional trailing ``Hz``. Returns None if unparseable.
+        """
+        if value is None:
+            return None
+        s = str(value).strip().lower().replace(" ", "")
+        if s.endswith("hz"):
+            s = s[:-2]
+        if not s:
+            return None
+        mult = 1.0
+        for suf, m in (("meg", 1e6), ("g", 1e9), ("m", 1e6), ("k", 1e3)):
+            if s.endswith(suf):
+                mult = m
+                s = s[: -len(suf)]
+                break
+        try:
+            return float(s) * mult
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _fmt_hz(hz: float) -> str:
+        """Compact human label for a frequency ('1.4G', '10M', '5k', '200')."""
+        for suf, scale in (("G", 1e9), ("M", 1e6), ("k", 1e3)):
+            if hz >= scale:
+                return f"{hz / scale:g}{suf}"
+        return f"{hz:g}"
 
     def _named_terminal_nodes(self, component) -> dict:
         """``{uppercased pin name: spice node}`` for a component's connected pins.

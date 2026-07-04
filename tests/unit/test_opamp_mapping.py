@@ -218,6 +218,93 @@ def test_single_output_opamp_no_warning(caplog):
     assert not warnings, warnings
 
 
+# --- Opt-in 1-pole GBW macromodel (report F3, stage 12.4) --------------------
+#
+# By default an op-amp is an ideal frequency-independent VCVS. With a GBW (explicit
+# Sim.Gbw, or a ModelLibrary OPAMP entry) it becomes a single-pole macromodel:
+# gain-stage VCVS -> R-C pole -> unity buffer, so cap-limited bandwidth and peaking
+# become simulatable. The internal nodes are named {ref}_p1 / {ref}_p2.
+
+
+def _lm358_amp(gbw=None):
+    """The non-inverting LM358 amp, optionally carrying a Sim.Gbw field."""
+
+    @circuit(name="lm358_gbw_amp")
+    def _c():
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="1")
+        kw = {"symbol": "Amplifier_Operational:LM358", "ref": "U1", "value": "LM358"}
+        if gbw is not None:
+            kw["Sim.Gbw"] = gbw
+        u1 = Component(**kw)
+        rf = Component(symbol="Device:R", ref="RF", value="10k")
+        rg = Component(symbol="Device:R", ref="RG", value="10k")
+        vin = Net("VIN")
+        vout = Net("VOUT")
+        fb = Net("FB")
+        gnd = Net("GND")
+        v1[1] += vin
+        v1[2] += gnd
+        u1[3] += vin
+        u1[2] += fb
+        u1[1] += vout
+        rf[1] += vout
+        rf[2] += fb
+        rg[1] += fb
+        rg[2] += gnd
+
+    return _c()
+
+
+def test_opamp_without_gbw_stays_ideal_single_vcvs():
+    """No Sim.Gbw -> exactly one VCVS, no macromodel internal nodes (byte-identical)."""
+    netlist = _netlist(_lm358_amp())
+    e_lines = [ln for ln in netlist.splitlines() if ln.startswith("EU1 ")]
+    assert len(e_lines) == 1, f"ideal op-amp should be a single VCVS:\n{netlist}"
+    assert "U1_p1" not in netlist and "U1_p2" not in netlist, netlist
+
+
+def test_opamp_gbw_macromodel_emits_pole_and_buffer():
+    """Sim.Gbw -> gain VCVS + R-C pole + buffer VCVS on internal nodes."""
+    netlist = _netlist(_lm358_amp(gbw="1.4G"))
+    assert "EU1_a U1_p1 0 VIN FB" in netlist, netlist  # gain stage
+    assert "EU1_b VOUT 0 U1_p2 0" in netlist, netlist  # unity buffer to output
+    assert any(
+        ln.startswith("RU1_p ") and "U1_p1 U1_p2" in ln for ln in netlist.splitlines()
+    ), netlist
+    assert any(
+        ln.startswith("CU1_p ") and "U1_p2 0" in ln for ln in netlist.splitlines()
+    ), netlist
+    # No plain ideal VCVS remains.
+    assert not any(
+        ln.startswith("EU1 ") for ln in netlist.splitlines()
+    ), netlist
+
+
+def test_opamp_gbw_pole_frequency_matches_gbw_over_aol0():
+    """The R-C pole sits at GBW/Aol0: fp = 1/(2*pi*R*C) == 1.4G/1e6 = 1400 Hz."""
+    import re as _re
+
+    netlist = _netlist(_lm358_amp(gbw="1.4G"))
+    r_val = c_val = None
+    for ln in netlist.splitlines():
+        if ln.startswith("RU1_p "):
+            r_val = float(ln.split()[-1])
+        elif ln.startswith("CU1_p "):
+            c_val = float(_re.sub(r"[a-zA-Z]+$", "", ln.split()[-1]))
+    assert r_val is not None and c_val is not None, netlist
+    fp = 1.0 / (2 * 3.141592653589793 * r_val * c_val)
+    assert fp == pytest.approx(1400.0, rel=0.02), fp
+
+
+def test_opamp_unparsable_gbw_falls_back_to_ideal(caplog):
+    """A garbage Sim.Gbw warns and falls back to the ideal single VCVS."""
+    with caplog.at_level(logging.WARNING, logger="circuit_synth.simulation.converter"):
+        netlist = _netlist(_lm358_amp(gbw="banana"))
+    e_lines = [ln for ln in netlist.splitlines() if ln.startswith("EU1 ")]
+    assert len(e_lines) == 1, netlist
+    assert any("Sim.Gbw" in r.getMessage() for r in caplog.records), caplog.records
+
+
 @pytest.mark.skipif(not _ngspice_loads(), reason="no loadable ngspice library")
 def test_noninverting_closed_loop_gain():
     """End-to-end: the ideal op-amp gives the analytic closed-loop gain.

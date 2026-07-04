@@ -152,6 +152,12 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `sim.model_provenance[ref].tier` (`datasheet_fit` / `generic` / `vendor_lib`) and
   logs it, so a generic is never silently passed off as the real part. Naming a
   part the library can't resolve is a hard error (declare the model, don't guess).
+- **Op-amps** default to an ideal VCVS (infinite gain-bandwidth), so feedback/source
+  capacitance has no effect on simulated bandwidth or stability. For a bandwidth- or
+  stability-sensitive design (e.g. a transimpedance amp with a large source cap) add
+  `Sim.Gbw="1.4G"` to opt into a single-pole GBW-limited macromodel — then the Rf·Cf
+  pole, source capacitance, and finite loop bandwidth interact, so cap-limited rolloff
+  and gain peaking become visible. Without `Sim.Gbw` the ideal model is unchanged.
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);
