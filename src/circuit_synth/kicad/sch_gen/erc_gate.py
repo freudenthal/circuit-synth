@@ -229,6 +229,44 @@ def run_erc(
 
 
 # --------------------------------------------------------------------------- #
+# (ref, pin) -> net resolution (KiCad ground truth via kicad-cli netlist)
+# --------------------------------------------------------------------------- #
+
+
+def _invert_named_nets(
+    named_nets: Dict[str, set],
+) -> Dict[Tuple[str, str], str]:
+    """Invert ``{net_name: {(ref, pin), ...}}`` to ``{(ref, pin): net_name}``.
+
+    Pure (no kicad-cli), so it is unit-testable with a plain dict. If a (ref, pin)
+    appears under more than one net name (should not happen in a valid netlist), the
+    last one wins -- callers treat this as a best-effort map.
+    """
+    mapping: Dict[Tuple[str, str], str] = {}
+    for net_name, pins in named_nets.items():
+        for ref, pin in pins:
+            mapping[(ref, pin)] = net_name
+    return mapping
+
+
+def _pin_net_map(schematic_path: str, kicad_cli: str) -> Dict[Tuple[str, str], str]:
+    """(ref, pin) -> net name, from ``kicad-cli sch export netlist`` (KiCad ground
+    truth). Raises on export/parse failure -- the caller decides how to degrade."""
+    from ...interop.netlist_compare import parse_netlist
+    from .selective_wiring import _export_netlist
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="cs_ercfix_"))
+    try:
+        out = tmpdir / "erc_autofix.net"
+        if not _export_netlist(kicad_cli, Path(schematic_path), out):
+            raise RuntimeError("netlist export failed")
+        parsed = parse_netlist(out)
+        return _invert_named_nets(parsed.named_nets)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
 # Classification + autofix
 # --------------------------------------------------------------------------- #
 

@@ -17,6 +17,7 @@ from circuit_synth.kicad.sch_gen.erc_gate import (
     ErcReport,
     ErcViolation,
     _apply_power_flag_autofixes,
+    _invert_named_nets,
     _next_flag_index,
     _parse_erc_json,
     classify,
@@ -117,6 +118,28 @@ def test_violation_ref_pins():
         ],
     )
     assert v.ref_pins == [("U1", "8"), ("U1", "5")]
+
+
+# --------------------------------------------------------------------------- #
+# Stage 18.2: invert a netlist's named_nets to a (ref, pin) -> net map.
+# --------------------------------------------------------------------------- #
+
+
+def test_invert_named_nets():
+    named = {
+        "GND": {("R1", "2"), ("#PWR01", "1")},
+        "V_POS_5V": {("U1", "1"), ("U1", "8")},
+    }
+    mapping = _invert_named_nets(named)
+    assert mapping[("R1", "2")] == "GND"
+    assert mapping[("#PWR01", "1")] == "GND"
+    assert mapping[("U1", "1")] == "V_POS_5V"
+    assert mapping[("U1", "8")] == "V_POS_5V"
+    assert len(mapping) == 4
+
+
+def test_invert_named_nets_empty():
+    assert _invert_named_nets({}) == {}
 
 
 def test_classify_only_power_pin_not_driven_is_autofix():
