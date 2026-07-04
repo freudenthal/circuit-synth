@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from ..agents.circuit_creator_agent import (
+from circuit_synth.ai_integration.claude.agents.circuit_creator_agent import (
     circuit_creator,
     create_custom_circuit,
     list_circuits,
@@ -159,9 +159,7 @@ def create_circuit_from_file(file_path: str):
                 )
 
                 if registration["success"]:
-                    print(
-                        f"Circuit registered with ID: {registration['circuit_id']}"
-                    )
+                    print(f"Circuit registered with ID: {registration['circuit_id']}")
                 else:
                     print(
                         f"Registration failed: {registration.get('error', 'Unknown error')}"

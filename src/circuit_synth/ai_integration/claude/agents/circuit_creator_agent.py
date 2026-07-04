@@ -11,8 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..core import Component, Net, circuit
-from ..manufacturing.jlcpcb import search_jlc_components_web
+from circuit_synth.core import Component, Net, circuit
+from circuit_synth.manufacturing.jlcpcb import search_jlc_components_web
 
 
 class CircuitCreatorAgent:
