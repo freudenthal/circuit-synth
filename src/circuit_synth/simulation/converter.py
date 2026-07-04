@@ -28,6 +28,7 @@ class ResolvedModel:
     tier: str  # datasheet_fit | generic | vendor_lib | unresolved
     name: str  # the resolved model/base name
     overridden: bool = False  # True if Sim.Params overlaid a derived card
+    source: str = ""  # provenance of a vendor_lib model: sim_library | local_store
 
 try:
     from PySpice.Spice.Netlist import Circuit as SpiceCircuit
@@ -290,6 +291,13 @@ class SpiceConverter:
             self._add_external_model(component, ref)
             return
 
+        # A model in the local MPN store is attached like an implicit Sim.Library
+        # (Stage 9.4), above the datasheet-fit/generic tiers.
+        store_path = self._store_lib_for(component)
+        if store_path:
+            self._add_store_model(component, ref, store_path)
+            return
+
         handlers = {
             "resistor": self._add_resistor,
             "capacitor": self._add_capacitor,
@@ -484,9 +492,14 @@ class SpiceConverter:
     @staticmethod
     def _spice_model_store_dir() -> str:
         """Local MPN-keyed model store (~/.circuit_synth/spice_models/models)."""
-        return os.path.join(
-            os.path.expanduser("~"), ".circuit_synth", "spice_models", "models"
-        )
+        try:
+            from .model_store import get_model_store
+
+            return get_model_store().models_dir
+        except Exception:  # pragma: no cover
+            return os.path.join(
+                os.path.expanduser("~"), ".circuit_synth", "spice_models", "models"
+            )
 
     def _lib_search_dirs(self) -> List[str]:
         """Directories a relative Sim.Library is resolved against, in order."""
@@ -547,6 +560,36 @@ class SpiceConverter:
         if mod:
             return "model", None
         return None, None
+
+    @staticmethod
+    def _scan_lib_first(path):
+        """First model in a file -> ('subckt', name, [nodes]) | ('model', name, None).
+
+        Used for store files keyed only by MPN, where the internal model/subckt
+        name isn't known ahead of time. Returns ``(None, None, None)`` if none.
+        """
+        if not path:
+            return None, None, None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return None, None, None
+        sub = re.search(
+            r"^\s*\.subckt\s+(\S+)(.*)$", text, re.IGNORECASE | re.MULTILINE
+        )
+        mod = re.search(r"^\s*\.model\s+(\S+)", text, re.IGNORECASE | re.MULTILINE)
+        # Honor whichever appears first in the file.
+        if sub and (not mod or sub.start() < mod.start()):
+            nodes = []
+            for tok in sub.group(2).split():
+                if "=" in tok:
+                    break
+                nodes.append(tok)
+            return "subckt", sub.group(1), nodes
+        if mod:
+            return "model", mod.group(1), None
+        return None, None, None
 
     @staticmethod
     def _parse_sim_pins(spec) -> dict:
@@ -617,12 +660,30 @@ class SpiceConverter:
         sim = self._sim_props(component)
         name = sim.get("name")
         path = self._resolve_lib_path(sim.get("library"))
-        self._include_lib(path)
         kind_in_file, subckt_nodes = self._scan_lib(path, name)
+        self._emit_external(
+            component, ref, path, name, kind_in_file, subckt_nodes, "sim_library"
+        )
+
+    def _add_store_model(self, component, ref, path) -> None:
+        """Attach a device's model from the local MPN store (name discovered)."""
+        kind_in_file, name, subckt_nodes = self._scan_lib_first(path)
+        self._emit_external(
+            component, ref, path, name, kind_in_file, subckt_nodes, "local_store"
+        )
+
+    def _emit_external(
+        self, component, ref, path, name, kind_in_file, subckt_nodes, source
+    ) -> None:
+        """Shared emit for an external model (Sim.Library or store), by file kind."""
+        self._include_lib(path)
         dev_kind = self._kind(component)
+        base = os.path.basename(str(path))
 
         if kind_in_file == "subckt":
-            nodes = self._external_nodes(component, sim.get("pins"), subckt_nodes)
+            nodes = self._external_nodes(
+                component, self._sim_props(component).get("pins"), subckt_nodes
+            )
             if subckt_nodes and len(nodes) != len(subckt_nodes):
                 logger.warning(
                     f"{ref}: subckt '{name}' takes {len(subckt_nodes)} nodes but "
@@ -630,25 +691,19 @@ class SpiceConverter:
                 )
             self.spice_circuit.X(ref, name, *nodes)
             self.model_provenance[ref] = ResolvedModel(
-                ref, dev_kind or "subckt", "vendor_lib", name
+                ref, dev_kind or "subckt", "vendor_lib", name, source=source
             )
-            logger.info(
-                f"{ref}: external subckt {name} from {os.path.basename(str(path))}"
-            )
+            logger.info(f"{ref}: external subckt {name} from {base} ({source})")
         elif kind_in_file == "model":
             nodes = self._get_component_nodes(component)
             self._emit_primitive_with_external_model(dev_kind, ref, name, nodes)
             self.model_provenance[ref] = ResolvedModel(
-                ref, dev_kind or "?", "vendor_lib", name
+                ref, dev_kind or "?", "vendor_lib", name, source=source
             )
-            logger.info(
-                f"{ref}: external .model {name} from {os.path.basename(str(path))}"
-            )
+            logger.info(f"{ref}: external .model {name} from {base} ({source})")
         else:
             # validate() reports this in strict mode; lenient mode just skips.
-            logger.warning(
-                f"{ref}: Sim.Name '{name}' not found in {path} - skipping"
-            )
+            logger.warning(f"{ref}: no usable model found in {path} - skipping")
 
     def _emit_primitive_with_external_model(self, kind, ref, name, nodes) -> None:
         """Emit a D/Q/M instance referencing an external ``.model`` name (no card)."""
@@ -667,6 +722,35 @@ class SpiceConverter:
 
     def _has_external_lib(self, component) -> bool:
         return bool(self._sim_props(component).get("library"))
+
+    def _component_mpn(self, component) -> Optional[str]:
+        """The MPN a component names, from an ``mpn`` field or its ``value``."""
+        extra = getattr(component, "_extra_fields", None)
+        if isinstance(extra, dict):
+            for key in ("mpn", "MPN", "Mpn"):
+                if extra.get(key):
+                    return str(extra[key])
+        value = self._attr(component, "value", None)
+        return str(value) if value else None
+
+    def _store_lib_for(self, component) -> Optional[str]:
+        """Path to a local-store model file matching this device's MPN, or None.
+
+        Only active devices (diode/BJT/MOSFET/op-amp) are matched, so a passive
+        R/C/L is never hijacked by a coincidentally-named file. An explicit
+        ``Sim.Library`` always takes precedence (handled before this is consulted).
+        """
+        if self._kind(component) not in ("diode", "bjt", "mosfet", "opamp"):
+            return None
+        mpn = self._component_mpn(component)
+        if not mpn:
+            return None
+        try:
+            from .model_store import get_model_store
+
+            return get_model_store().lookup(mpn)
+        except Exception:  # pragma: no cover
+            return None
 
     def _emit_models(self):
         """Emit a ``.model`` card for each referenced built-in and derived model.
@@ -1417,6 +1501,8 @@ class SpiceConverter:
         for component in self._iter_components():
             if self._sim_excluded(component) or self._has_external_lib(component):
                 continue
+            if self._store_lib_for(component):
+                continue  # resolved from the local MPN store (tier vendor_lib)
             model = self._device_model_name(component)
             if model is None:
                 continue

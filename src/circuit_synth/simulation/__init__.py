@@ -28,6 +28,7 @@ Example Usage:
 from .analysis import ACAnalysis, DCAnalysis, TransientAnalysis
 from .converter import ResolvedModel, SimulationValidationError, SpiceConverter
 from .manufacturer_models import ManufacturerModels, get_manufacturer_models
+from .model_store import SpiceModelStore, get_model_store, resolve_mpn
 from .models import ModelLibrary, SpiceModel, get_model_library
 from .simulator import CircuitSimulator, SimulationResult
 from .testbench import TestBenchGenerator, generate_testbench_for_circuit
@@ -50,6 +51,9 @@ __all__ = [
     "get_model_library",
     "ManufacturerModels",
     "get_manufacturer_models",
+    "SpiceModelStore",
+    "get_model_store",
+    "resolve_mpn",
     "TestBenchGenerator",
     "generate_testbench_for_circuit",
     "SimulationVisualizer",
