@@ -266,6 +266,21 @@ def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
     # ValidationError on a duplicate reference).
     flag_index = _next_flag_index(by_ref)
 
+    # Positions already occupied by a PWR_FLAG (from a prior iteration). A ref that
+    # the autofix cannot actually clear -- e.g. an op-amp whose power *rails* are
+    # undriven, where by_ref[value] is the part number (not a net) and pin "1" is a
+    # signal pin -- would otherwise get a fresh flag stacked on the same point every
+    # iteration, which ERC then reports as a pin_to_pin short between two flags.
+    # Never place two flags on one point (stage 17.2 follow-up).
+    def _pt_key(x, y):
+        return (round(float(x), 2), round(float(y), 2))
+
+    occupied = {
+        _pt_key(c.position.x, c.position.y)
+        for c in sch.components
+        if str(c.reference).startswith("#FLG") and getattr(c, "position", None)
+    }
+
     flagged_nets = set()
     added = 0
     for ref in sorted(undriven_refs):
@@ -279,14 +294,24 @@ def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
         if pin_pos is None:
             logger.debug("ERC autofix: no pin position for %s, skipping", ref)
             continue
+        flag_pos = (pin_pos.x, pin_pos.y + 5.08)
+        if _pt_key(*flag_pos) in occupied:
+            logger.debug(
+                "ERC autofix: a PWR_FLAG already sits at %s (via %s); skipping to "
+                "avoid stacking flags",
+                flag_pos,
+                ref,
+            )
+            continue
         flag_ref = f"#FLG{flag_index:02d}"
         flag_index += 1
         sch.components.add(
             "power:PWR_FLAG",
             reference=flag_ref,
             value="PWR_FLAG",
-            position=(pin_pos.x, pin_pos.y + 5.08),
+            position=flag_pos,
         )
+        occupied.add(_pt_key(*flag_pos))
         wire = sch.add_wire_between_pins(ref, "1", flag_ref, "1")
         if wire is None:
             logger.debug("ERC autofix: could not wire PWR_FLAG to %s", ref)

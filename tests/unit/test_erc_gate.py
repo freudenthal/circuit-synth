@@ -180,18 +180,18 @@ def _generate_divider(tmpdir):
     return next(Path(tmpdir).rglob("FlgDiv.kicad_sch"))
 
 
-def _flg_nums(sch_path):
+def _flg_refs_and_positions(sch_path):
     import re
 
     import kicad_sch_api as ksa
 
     sch = ksa.load_schematic(str(sch_path))
-    nums = []
+    refs, positions = [], []
     for c in sch.components:
-        m = re.match(r"#FLG0*(\d+)$", str(c.reference))
-        if m:
-            nums.append(int(m.group(1)))
-    return sorted(nums)
+        if re.match(r"#FLG\d+$", str(c.reference)):
+            refs.append(str(c.reference))
+            positions.append((round(c.position.x, 2), round(c.position.y, 2)))
+    return refs, positions
 
 
 def _report_for_power_symbols(sch_path):
@@ -215,11 +215,12 @@ def _report_for_power_symbols(sch_path):
     return ErcReport(violations=violations, schematic_path=str(sch_path)), pwr_refs
 
 
-def test_apply_power_flag_autofixes_twice_does_not_collide():
+def test_apply_power_flag_autofixes_twice_does_not_collide_or_stack():
     """The G3 bug: a second autofix pass re-emitted #FLG01 and raised.
 
-    Applying the fix twice against the same file must seed past the first pass's
-    flags (#FLG02...) instead of colliding on #FLG01.
+    Applying the fix twice against the same file must (a) not raise -- seeding past
+    existing flags -- and (b) not stack a second flag on the same point (the
+    position guard), so all #FLG refs and positions stay unique.
     """
     with TemporaryDirectory() as tmpdir:
         sch = _generate_divider(tmpdir)
@@ -228,12 +229,15 @@ def test_apply_power_flag_autofixes_twice_does_not_collide():
 
         first = _apply_power_flag_autofixes(str(sch), report)
         assert first >= 1
-        nums_after_first = _flg_nums(sch)
-        assert nums_after_first, "first pass should have added a #FLG"
+        refs_1, pos_1 = _flg_refs_and_positions(sch)
+        assert refs_1, "first pass should have added a #FLG"
 
-        # Second pass previously raised ValidationError (#FLG01 already exists).
+        # Second pass previously raised ValidationError (#FLG01 already exists);
+        # now it must return cleanly (the GND flag's position is already occupied,
+        # so it is skipped rather than stacked).
         second = _apply_power_flag_autofixes(str(sch), report)
-        assert second >= 1
-        nums_after_second = _flg_nums(sch)
-        # New flags were allocated above the existing ones -> no collision.
-        assert max(nums_after_second) > max(nums_after_first)
+        assert isinstance(second, int)  # did not raise
+
+        refs_2, pos_2 = _flg_refs_and_positions(sch)
+        assert len(refs_2) == len(set(refs_2)), f"duplicate #FLG refs: {refs_2}"
+        assert len(pos_2) == len(set(pos_2)), f"two flags stacked on a point: {pos_2}"
