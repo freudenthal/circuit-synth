@@ -437,7 +437,15 @@ class KiCadToPythonSyncer:
 
         # Extract nets from JSON dict format
         nets = []
-        for net_name, connections in self.json_data.get("nets", {}).items():
+        for net_name, net_data in self.json_data.get("nets", {}).items():
+            # Current schema (#582): each net is a dict carrying its connections
+            # under "nodes" plus metadata. Legacy schema: a bare list of
+            # connection dicts. Accept both.
+            if isinstance(net_data, dict):
+                connections = net_data.get("nodes", [])
+            else:
+                connections = net_data
+
             net_connections = []
             for conn in connections:
                 comp_ref = conn.get("component")

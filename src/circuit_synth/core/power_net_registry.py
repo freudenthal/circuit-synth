@@ -9,7 +9,8 @@ to power symbols without explicit user declaration.
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Optional, Set
+
 from loguru import logger
 
 
@@ -48,7 +49,7 @@ class PowerNetRegistry:
         False
     """
 
-    _instance: Optional['PowerNetRegistry'] = None
+    _instance: Optional["PowerNetRegistry"] = None
     _initialized: bool = False
 
     # Known power nets and their symbols
@@ -68,11 +69,12 @@ class PowerNetRegistry:
         """
         Scan KiCad power symbol library to build registry.
 
-        Parses power.kicad_sym to extract all power symbol names
-        and build mapping of net name -> lib_id.
-
-        IMPORTANT: Always includes common power nets (VBAT, VIN, VOUT, etc.)
-        even if not in KiCad library, by merging with builtin defaults.
+        Parses power.kicad_sym to extract the real power symbol names and builds
+        the net-name -> lib_id mapping. Builtin defaults are seeded first as a
+        fallback for when the library is not found, then -- when the library IS
+        found -- every mapping is validated against it and any entry pointing at a
+        symbol this KiCad does not actually provide (e.g. power:VIN/VOUT/VBAT) is
+        pruned, so generation never emits an "Unknown library ID: power:*".
         """
         logger.debug("Discovering power symbols from KiCad library...")
 
@@ -83,35 +85,57 @@ class PowerNetRegistry:
         # Get power library path
         power_lib_path = self._find_power_library()
         if not power_lib_path:
-            logger.debug(f"Could not find power.kicad_sym, using {initial_count} built-in defaults only")
+            logger.debug(
+                f"Could not find power.kicad_sym, using {initial_count} built-in defaults only"
+            )
             return
 
         # Parse power.kicad_sym and MERGE with builtin defaults
         try:
-            with open(power_lib_path, 'r') as f:
+            with open(power_lib_path, "r") as f:
                 content = f.read()
 
-            # Extract symbol names using regex
-            # Pattern: (symbol "SYMBOL_NAME"
-            pattern = r'\(symbol\s+"([^"]+)"'
-            matches = re.findall(pattern, content)
+            # Extract symbol names. The regex also matches per-unit body symbols
+            # (e.g. "GND_0_1"); those are internal and never referenced by a
+            # lib_id, so keep only the top-level power symbol names. Preserve
+            # file order (dedup in place) so variant-collision resolution is
+            # deterministic across runs.
+            all_matches = re.findall(r'\(symbol\s+"([^"]+)"', content)
+            library_symbols = []
+            _seen = set()
+            for name in all_matches:
+                if re.search(r"_\d+_\d+$", name) or name in _seen:
+                    continue
+                _seen.add(name)
+                library_symbols.append(name)
+            library_symbol_set = set(library_symbols)
 
-            discovered_count = 0
-            for symbol_name in matches:
+            for symbol_name in library_symbols:
                 # symbol_name is like "+3V3", "GND", "VCC", etc.
                 lib_id = f"power:{symbol_name}"
 
                 # Store with exact name (may override builtin default)
                 self._power_symbols[symbol_name] = lib_id
-                discovered_count += 1
 
                 # Also store common variants
                 # e.g., "3V3" -> "power:+3V3", "3.3V" -> "power:+3V3"
                 self._add_common_variants(symbol_name, lib_id)
 
+            # Prune any mapping (builtin default or variant) whose target symbol
+            # this library does not provide, so no net can be classified as power
+            # only to fail later with "Unknown library ID: power:<name>".
+            pruned = [
+                net_name
+                for net_name, lib_id in self._power_symbols.items()
+                if lib_id.split("power:", 1)[-1] not in library_symbol_set
+            ]
+            for net_name in pruned:
+                del self._power_symbols[net_name]
+
             logger.debug(
-                f"Discovered {discovered_count} symbols from KiCad library, "
-                f"merged with {initial_count} builtins = {len(self._power_symbols)} total mappings"
+                f"Discovered {len(library_symbols)} symbols from KiCad library, "
+                f"pruned {len(pruned)} mapping(s) with no matching symbol "
+                f"= {len(self._power_symbols)} total mappings"
             )
 
         except Exception as e:
@@ -206,13 +230,11 @@ class PowerNetRegistry:
             "AGND": "power:GND",  # Analog ground → use GND symbol
             "DGND": "power:GND",  # Digital ground → use GND symbol
             "PGND": "power:GND",  # Power ground → use GND symbol
-
             # Positive supplies
             "VCC": "power:VCC",
             "VDD": "power:VDD",
             "VEE": "power:VEE",
             "VSS": "power:VSS",
-
             # Fixed voltages (exact names)
             "+3V3": "power:+3V3",
             "+5V": "power:+5V",
@@ -220,7 +242,6 @@ class PowerNetRegistry:
             "+15V": "power:+15V",
             "+24V": "power:+24V",
             "+48V": "power:+48V",
-
             # Common variants
             "3V3": "power:+3V3",
             "+3.3V": "power:+3V3",
@@ -230,17 +251,17 @@ class PowerNetRegistry:
             "15V": "power:+15V",
             "24V": "power:+24V",
             "48V": "power:+48V",
-
             # Negative voltages
             "-5V": "power:-5V",
             "-12V": "power:-12V",
             "-15V": "power:-15V",
-
             # Special purpose
             "VBUS": "power:VBUS",
-            "VBAT": "power:VBAT",
-            "VIN": "power:VIN",
-            "VOUT": "power:VOUT",
+            # NOTE: VBAT/VIN/VOUT are intentionally NOT here -- KiCad's power
+            # library has no such symbol, so classifying them as power nets makes
+            # the writer emit an "Unknown library ID: power:VIN" and place nothing.
+            # They are signal/IO nets. (If a KiCad version ever ships these
+            # symbols, the library scan below re-adds them automatically.)
             "+1V0": "power:+1V0",
             "1V0": "power:+1V0",
             "+1V2": "power:+1V2",
