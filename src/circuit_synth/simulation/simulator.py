@@ -151,6 +151,64 @@ class SimulationResult:
             raise KeyError(f"Node '{node}' not found in AC analysis results")
         return np.asarray(data, dtype=complex)
 
+    def time_array(self):
+        """The transient time axis (seconds) as a real float ndarray.
+
+        Raises if this result is not from a transient analysis.
+        """
+        import numpy as np
+
+        t = getattr(self.analysis, "time", None)
+        if t is None:
+            raise ValueError(
+                "no time axis available (transient plots need a transient result)"
+            )
+        return np.real(np.asarray(t)).astype(float)
+
+    def sweep_array(self):
+        """The DC-sweep axis (the swept source's values) as a real float ndarray.
+
+        Raises if this result is not from a DC sweep analysis.
+        """
+        import numpy as np
+
+        s = getattr(self.analysis, "sweep", None)
+        if s is None:
+            raise ValueError(
+                "no sweep axis available (DC-transfer plots need a dc_analysis result)"
+            )
+        return np.real(np.asarray(s)).astype(float)
+
+    def save_bode_plot(self, path, node: str, input_magnitude: float = 1.0):
+        """Save a Bode plot (magnitude + phase) for ``node`` to ``path`` (PNG).
+
+        Headless-safe; returns the written ``Path`` or ``None`` if matplotlib is
+        unavailable. Delegates to :mod:`circuit_synth.simulation.plotting`.
+        """
+        from .plotting import save_bode_plot
+
+        return save_bode_plot(self, path, node, input_magnitude=input_magnitude)
+
+    def save_transient_plot(self, path, nodes):
+        """Save a transient waveform plot of ``nodes`` to ``path`` (PNG).
+
+        Headless-safe; returns the written ``Path`` or ``None`` if matplotlib is
+        unavailable.
+        """
+        from .plotting import save_transient_plot
+
+        return save_transient_plot(self, path, nodes)
+
+    def save_dc_transfer_plot(self, path, node: str, sweep_label: str = "Vsweep"):
+        """Save a DC-transfer plot (``node`` vs the swept source) to ``path`` (PNG).
+
+        Headless-safe; returns the written ``Path`` or ``None`` if matplotlib is
+        unavailable.
+        """
+        from .plotting import save_dc_transfer_plot
+
+        return save_dc_transfer_plot(self, path, node, sweep_label=sweep_label)
+
     def bode(self, node: str, input_magnitude: float = 1.0):
         """Bode data for a node: ``(frequencies, magnitude_db, phase_deg)``.
 
