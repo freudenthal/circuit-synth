@@ -1645,11 +1645,23 @@ class SpiceConverter:
             name = self._attr(net, "name", None) or str(net)
             if self._is_ground_name(name) or name in driven:
                 continue
-            count = (
-                self._net_live_pin_count(net, excluded_refs)
-                if excluded_refs
-                else self._net_pin_count(net)
-            )
+            if excluded_refs:
+                # A net whose *only* pins belong to Sim.Enable=0 parts never enters
+                # the SPICE netlist, so it isn't floating -- it's absent. Drop it
+                # instead of flagging (report F6): otherwise a bias/output rail on a
+                # sim-disabled sensor/connector aborts the whole simulation.
+                live = self._net_live_pin_count(net, excluded_refs)
+                total = self._net_pin_count(net)
+                if live is not None and total is not None and live == 0 and total > 0:
+                    logger.debug(
+                        f"net '{name}' is private to Sim.Enable=0 part(s) "
+                        f"({total} pin(s), all excluded); dropped from validation "
+                        f"(not floating)"
+                    )
+                    continue
+                count = live
+            else:
+                count = self._net_pin_count(net)
             if count is None:
                 continue  # can't tell (dict/JSON net) -> don't block
             if count < 2:

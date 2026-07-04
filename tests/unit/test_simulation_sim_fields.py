@@ -198,6 +198,72 @@ def test_net_orphaned_by_exclusion_is_floating():
     assert any("SIG" in p for p in err.problems), err.problems
 
 
+def test_net_private_to_excluded_part_is_dropped_not_floating():
+    """A net whose ONLY pins belong to Sim.Enable=0 parts is dropped, not flagged.
+
+    Report F6: a sensor/connector placed with Sim.Enable=0 (schematic/BOM only)
+    carries private rails -- e.g. the SiPM's V_BIAS_NEG / FAST -- whose every pin
+    is excluded from the netlist. Those nets never enter SPICE, so they are absent,
+    not floating; flagging them aborts an otherwise valid simulation.
+    """
+
+    @circuit(name="PrivateExcludedNet")
+    def cir():
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        r2 = Component(symbol="Device:R", ref="R2", value="2k")
+        # A sim-disabled connector: pin 1 rides the live VIN rail, pin 2 goes to a
+        # private BIAS net that nothing else in the sim touches.
+        j1 = Component(
+            symbol="Device:R", ref="J1", value="0", **{"Sim.Enable": "0"}
+        )
+        vin = Net("VIN")
+        out = Net("OUT")
+        gnd = Net("GND")
+        bias = Net("BIAS")  # private to the excluded J1
+        v1[1] += vin
+        v1[2] += gnd
+        r1[1] += vin
+        r1[2] += out
+        r2[1] += out
+        r2[2] += gnd
+        j1[1] += vin
+        j1[2] += bias
+
+    assert _validate(cir()) is None
+
+
+def test_net_private_to_enabled_part_still_floating():
+    """The same private net, with the part sim-ENABLED, is still a floating error.
+
+    Guards the F6 fix from over-reaching: only an *all-excluded* net is dropped.
+    """
+
+    @circuit(name="PrivateEnabledNet")
+    def cir():
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        r2 = Component(symbol="Device:R", ref="R2", value="2k")
+        # Same topology, but J1 is now part of the simulation: its pin-2 dangles.
+        j1 = Component(symbol="Device:R", ref="J1", value="0")
+        vin = Net("VIN")
+        out = Net("OUT")
+        gnd = Net("GND")
+        bias = Net("BIAS")
+        v1[1] += vin
+        v1[2] += gnd
+        r1[1] += vin
+        r1[2] += out
+        r2[1] += out
+        r2[2] += gnd
+        j1[1] += vin
+        j1[2] += bias
+
+    err = _validate(cir())
+    assert err is not None
+    assert any("BIAS" in p for p in err.problems), err.problems
+
+
 # --------------------------------------------------------------------------- #
 # Sim.Device classification override                                          #
 # --------------------------------------------------------------------------- #
