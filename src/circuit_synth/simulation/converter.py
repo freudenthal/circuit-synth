@@ -6,6 +6,7 @@ to SPICE netlists that can be simulated with PySpice/ngspice.
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -102,6 +103,8 @@ class SpiceConverter:
         self.library_models = {}
         # ref -> ResolvedModel: which tier each active device's model came from.
         self.model_provenance = {}
+        # Absolute paths of external .lib/.sub files already `.include`d (dedup).
+        self.included_libs = set()
 
     def convert(self, strict: bool = True) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit.
@@ -279,6 +282,12 @@ class SpiceConverter:
 
         if self._sim_excluded(component):
             logger.info(f"{ref}: excluded from simulation (Sim.Enable=0)")
+            return
+
+        # An external vendor model (Sim.Library) supersedes the built-in handlers:
+        # attach the .lib/.subckt directly (Stage 9.3).
+        if self._sim_props(component).get("library"):
+            self._add_external_model(component, ref)
             return
 
         handlers = {
@@ -467,6 +476,197 @@ class SpiceConverter:
             self.used_models.add(name)
         else:  # datasheet_fit: emit the library's params explicitly
             self.library_models[name] = (device_type, params)
+
+    # ------------------------------------------------------------------ #
+    # External vendor models: Sim.Library / Sim.Name / Sim.Pins (9.3)    #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _spice_model_store_dir() -> str:
+        """Local MPN-keyed model store (~/.circuit_synth/spice_models/models)."""
+        return os.path.join(
+            os.path.expanduser("~"), ".circuit_synth", "spice_models", "models"
+        )
+
+    def _lib_search_dirs(self) -> List[str]:
+        """Directories a relative Sim.Library is resolved against, in order."""
+        dirs = [os.getcwd(), self._spice_model_store_dir()]
+        # Fall back near the circuit's own source file when we can tell where it is.
+        src = getattr(self.circuit, "source_file", None) or getattr(
+            self.circuit, "_source_file", None
+        )
+        if src:
+            dirs.insert(0, os.path.dirname(os.path.abspath(str(src))))
+        return dirs
+
+    def _resolve_lib_path(self, lib) -> Optional[str]:
+        """Resolve a Sim.Library reference to an absolute path (existing if found)."""
+        if not lib:
+            return None
+        p = str(lib)
+        if os.path.isabs(p):
+            return p
+        for base in self._lib_search_dirs():
+            cand = os.path.join(base, p)
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+        return os.path.abspath(p)  # may not exist; validate() reports it
+
+    @staticmethod
+    def _scan_lib(path, name):
+        """Find ``name`` in a .lib/.sub file -> ('subckt', [nodes]) | ('model', None).
+
+        Returns ``(None, None)`` if the file is unreadable or defines neither a
+        ``.subckt`` nor a ``.model`` by that name. Subckt node names are read from
+        the definition line (params like ``PARAM=1`` end the node list).
+        """
+        if not name or not path:
+            return None, None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return None, None
+        sub = re.search(
+            rf"^\s*\.subckt\s+{re.escape(str(name))}\b(.*)$",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if sub:
+            nodes = []
+            for tok in sub.group(1).split():
+                if "=" in tok:
+                    break  # start of subckt parameters
+                nodes.append(tok)
+            return "subckt", nodes
+        mod = re.search(
+            rf"^\s*\.model\s+{re.escape(str(name))}\b",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if mod:
+            return "model", None
+        return None, None
+
+    @staticmethod
+    def _parse_sim_pins(spec) -> dict:
+        """Parse KiCad ``Sim.Pins`` (``"1=out 2=inp"``) -> {symbol_pin: target}."""
+        out = {}
+        if not spec:
+            return out
+        for tok in str(spec).replace(",", " ").split():
+            key, sep, val = tok.partition("=")
+            if sep and key.strip():
+                out[key.strip()] = val.strip()
+        return out
+
+    def _symbol_pin_nodes(self, component) -> dict:
+        """{symbol pin number (str): spice node} for a component's connected pins."""
+        out = {}
+        pin_map = getattr(component, "_pins", None)
+        if isinstance(pin_map, dict):
+            for num, pin in pin_map.items():
+                net = getattr(pin, "net", None)
+                name = getattr(net, "name", None)
+                if name:
+                    out[str(num)] = self.node_map.get(name, name)
+        return out
+
+    def _external_nodes(self, component, pins_spec, subckt_nodes) -> List[str]:
+        """Order a component's nets to match an external subckt's node order.
+
+        With ``Sim.Pins`` each symbol pin maps to a subckt node (by name or 1-based
+        position); nodes are emitted in subckt-definition order. Without it, the
+        symbol's connected pins are used in pin-number order.
+        """
+        sym_node = self._symbol_pin_nodes(component)
+        mapping = self._parse_sim_pins(pins_spec)
+        if not mapping:
+            return [
+                sym_node[k]
+                for k in sorted(sym_node, key=self._pin_sort_key)
+            ]
+        pos_node = {}
+        for sym_pin, target in mapping.items():
+            node = sym_node.get(str(sym_pin))
+            if node is None:
+                continue
+            if subckt_nodes and target in subckt_nodes:
+                idx = subckt_nodes.index(target) + 1
+            else:
+                try:
+                    idx = int(target)
+                except (TypeError, ValueError):
+                    continue
+            pos_node[idx] = node
+        return [pos_node[i] for i in sorted(pos_node)]
+
+    def _include_lib(self, path) -> None:
+        """`.include` an external file once (idempotent per converter)."""
+        if not path or path in self.included_libs:
+            return
+        self.included_libs.add(path)
+        try:
+            self.spice_circuit.include(path)
+            logger.debug(f"Included SPICE library {path}")
+        except Exception as exc:  # pragma: no cover - PySpice/ngspice specifics
+            logger.warning(f"Failed to include SPICE library {path}: {exc}")
+
+    def _add_external_model(self, component, ref) -> None:
+        """Attach a device's external vendor model (Sim.Library + Sim.Name)."""
+        sim = self._sim_props(component)
+        name = sim.get("name")
+        path = self._resolve_lib_path(sim.get("library"))
+        self._include_lib(path)
+        kind_in_file, subckt_nodes = self._scan_lib(path, name)
+        dev_kind = self._kind(component)
+
+        if kind_in_file == "subckt":
+            nodes = self._external_nodes(component, sim.get("pins"), subckt_nodes)
+            if subckt_nodes and len(nodes) != len(subckt_nodes):
+                logger.warning(
+                    f"{ref}: subckt '{name}' takes {len(subckt_nodes)} nodes but "
+                    f"{len(nodes)} were mapped (check Sim.Pins)"
+                )
+            self.spice_circuit.X(ref, name, *nodes)
+            self.model_provenance[ref] = ResolvedModel(
+                ref, dev_kind or "subckt", "vendor_lib", name
+            )
+            logger.info(
+                f"{ref}: external subckt {name} from {os.path.basename(str(path))}"
+            )
+        elif kind_in_file == "model":
+            nodes = self._get_component_nodes(component)
+            self._emit_primitive_with_external_model(dev_kind, ref, name, nodes)
+            self.model_provenance[ref] = ResolvedModel(
+                ref, dev_kind or "?", "vendor_lib", name
+            )
+            logger.info(
+                f"{ref}: external .model {name} from {os.path.basename(str(path))}"
+            )
+        else:
+            # validate() reports this in strict mode; lenient mode just skips.
+            logger.warning(
+                f"{ref}: Sim.Name '{name}' not found in {path} - skipping"
+            )
+
+    def _emit_primitive_with_external_model(self, kind, ref, name, nodes) -> None:
+        """Emit a D/Q/M instance referencing an external ``.model`` name (no card)."""
+        if kind == "diode" and len(nodes) >= 2:
+            self.spice_circuit.D(ref, nodes[0], nodes[1], model=name)
+        elif kind == "bjt" and len(nodes) >= 3:
+            self.spice_circuit.Q(ref, nodes[0], nodes[1], nodes[2], model=name)
+        elif kind == "mosfet" and len(nodes) >= 3:
+            bulk = nodes[3] if len(nodes) >= 4 else nodes[2]
+            self.spice_circuit.M(ref, nodes[0], nodes[1], nodes[2], bulk, model=name)
+        else:
+            logger.warning(
+                f"{ref}: external .model '{name}' needs a diode/BJT/MOSFET device "
+                f"(kind={kind}, {len(nodes)} nodes) - skipping"
+            )
+
+    def _has_external_lib(self, component) -> bool:
+        return bool(self._sim_props(component).get("library"))
 
     def _emit_models(self):
         """Emit a ``.model`` card for each referenced built-in and derived model.
@@ -1148,8 +1348,10 @@ class SpiceConverter:
                 excluded_refs.add(self._attr(component, "ref", None) or "?")
 
         # 1. Every component must map to a known SPICE primitive (Sim.Device wins).
+        #    Parts carrying an external model (Sim.Library) are exempt -- the
+        #    external .subckt/.model defines their behaviour (checked in #6).
         for component in self._iter_components():
-            if self._sim_excluded(component):
+            if self._sim_excluded(component) or self._has_external_lib(component):
                 continue
             symbol = self._attr(component, "symbol", "")
             ref = self._attr(component, "ref", None) or "?"
@@ -1213,7 +1415,7 @@ class SpiceConverter:
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
         #    built-in generic (otherwise ngspice errors on an undefined model).
         for component in self._iter_components():
-            if self._sim_excluded(component):
+            if self._sim_excluded(component) or self._has_external_lib(component):
                 continue
             model = self._device_model_name(component)
             if model is None:
@@ -1240,6 +1442,32 @@ class SpiceConverter:
                 problems.append(
                     f"{ref}: references SPICE model '{model}' with no .model card "
                     f"(not in the model library; known generics: {known})"
+                )
+
+        # 6. External vendor models (Sim.Library) must be coherent and locatable.
+        for component in self._iter_components():
+            if self._sim_excluded(component) or not self._has_external_lib(component):
+                continue
+            sim = self._sim_props(component)
+            ref = self._attr(component, "ref", None) or "?"
+            name = sim.get("name")
+            if not name:
+                problems.append(
+                    f"{ref}: Sim.Library set without Sim.Name (which subckt/model "
+                    f"to use is ambiguous)"
+                )
+                continue
+            path = self._resolve_lib_path(sim.get("library"))
+            if not path or not os.path.exists(path):
+                problems.append(
+                    f"{ref}: Sim.Library file not found: {sim.get('library')}"
+                )
+                continue
+            kind_in_file, _nodes = self._scan_lib(path, name)
+            if kind_in_file is None:
+                problems.append(
+                    f"{ref}: Sim.Name '{name}' is neither a .subckt nor a .model in "
+                    f"{os.path.basename(str(path))}"
                 )
 
         if problems:
