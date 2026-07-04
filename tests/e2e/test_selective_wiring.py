@@ -85,6 +85,10 @@ def test_selective_wiring_draws_wire_no_new_erc(tmp_path):
     assert result["wires_drawn"] >= 1, result
     wires_after = sch.read_text(encoding="utf-8").count("(wire")
     assert wires_after > wires_before
+    # Post-commit ground truth read back from disk (stage 17.5): the file carries
+    # at least the wires we drew (>= because a schematic may already contain some).
+    assert result["wires_in_file"] >= result["wires_drawn"], result
+    assert result["wires_in_file"] == wires_after
 
     after = _erc_types(cli, sch, tmp_path / "after.json")
     assert not (

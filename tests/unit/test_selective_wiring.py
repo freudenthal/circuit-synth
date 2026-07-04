@@ -12,6 +12,7 @@ import pytest
 from circuit_synth.kicad.sch_gen.selective_wiring import (
     DEFAULT_MAX_WIRE_DIST_MM,
     _eligible_nets,
+    wire_local_nets,
 )
 
 pytestmark = pytest.mark.unit
@@ -79,3 +80,11 @@ def test_threshold_boundary_inclusive():
     )
     named = {"MID": {("R1", "2"), ("R2", "1")}}
     assert len(_eligible_nets(sch, named, DEFAULT_MAX_WIRE_DIST_MM)) == 1
+
+
+def test_result_always_carries_wires_in_file_key(tmp_path):
+    # Even on the early "schematic not found" return, the self-verifying
+    # wires_in_file key is present (stage 17.5) so callers/logs can rely on it.
+    result = wire_local_nets(str(tmp_path / "does_not_exist.kicad_sch"))
+    assert result["reason"] == "schematic not found"
+    assert result["wires_in_file"] == 0

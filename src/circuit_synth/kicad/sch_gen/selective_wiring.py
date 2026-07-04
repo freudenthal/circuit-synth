@@ -20,6 +20,7 @@ visible connectivity); removing them is a later refinement.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -63,6 +64,7 @@ def wire_local_nets(
         "eligible": 0,
         "reverted": False,
         "reason": "",
+        "wires_in_file": 0,
     }
 
     sch_path = Path(schematic_path)
@@ -136,7 +138,20 @@ def wire_local_nets(
         # 5) Safe -- commit to the real file.
         shutil.copyfile(trial, sch_path)
         result["wires_drawn"] = drawn
-        logger.info("Selective wiring drew %d wire(s) on %s", drawn, sch_path.name)
+        # Read the committed file back and report the actual wire count as ground
+        # truth (stage 17.5). A false "skipped" log (G2) plus a bad grep pattern
+        # (counting "(wire " with a trailing space, which the writer never emits)
+        # produced a confident, wrong wire-persistence bug report. Callers/logs now
+        # carry what is on disk, not intent. Token-boundary pattern -- the writer
+        # emits "(wire\n".
+        committed_text = sch_path.read_text(encoding="utf-8")
+        result["wires_in_file"] = len(re.findall(r"\(wire\b", committed_text))
+        logger.info(
+            "Selective wiring drew %d wire(s) on %s (%d in file)",
+            drawn,
+            sch_path.name,
+            result["wires_in_file"],
+        )
         return result
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
