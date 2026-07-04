@@ -30,6 +30,7 @@ class ResolvedModel:
     overridden: bool = False  # True if Sim.Params overlaid a derived card
     source: str = ""  # provenance of a vendor_lib model: sim_library | local_store
 
+
 try:
     from PySpice.Spice.Netlist import Circuit as SpiceCircuit
     from PySpice.Unit import *
@@ -106,6 +107,94 @@ class SpiceConverter:
         self.model_provenance = {}
         # Absolute paths of external .lib/.sub files already `.include`d (dedup).
         self.included_libs = set()
+        # After _flatten on a hierarchical circuit: flat_ref -> (subcircuit_name,
+        # original_ref) for any ref that had to be uniquified. Empty otherwise.
+        # Keeps model provenance / error messages traceable back to the source.
+        self.flattened_ref_map = {}
+
+    class _FlatCircuit:
+        """A read-only, flattened view of a hierarchical circuit.
+
+        The converter only reads ``.components`` (dict ref->component),
+        ``.nets`` (dict name->net) and ``.name`` off its circuit, so this thin
+        view is all conversion/validation need after flattening.
+        """
+
+        def __init__(self, name, components, nets):
+            self.name = name
+            self.components = components
+            self.nets = nets
+
+    @staticmethod
+    def _iter_values(container):
+        """Values of a dict-or-iterable container (components/nets come as either)."""
+        if hasattr(container, "values"):
+            return list(container.values())
+        if hasattr(container, "__iter__"):
+            return list(container)
+        return []
+
+    def _flatten(self, circuit):
+        """Merge a hierarchical circuit's components and nets into one view.
+
+        Returns ``circuit`` unchanged when it has no subcircuits. Otherwise walks
+        the subcircuit tree depth-first and returns a :class:`_FlatCircuit` with:
+
+        - **components** merged into one dict. Refs are normally already unique
+          across the hierarchy (the reference manager uniquifies at construction),
+          but a genuine collision (two *distinct* components sharing a ref) is
+          resolved by renaming the later one -- which propagates to its pins'
+          string form (read live), so node extraction stays correct.
+        - **nets** merged by name. A net shared across sheets is the *same object*
+          (same name) so it merges cleanly; two *distinct* nets sharing a name
+          would be conflated into one node, so that case is logged as a warning
+          (a name-scoping limitation, not introduced by flattening).
+        """
+        if not getattr(circuit, "_subcircuits", None):
+            return circuit  # already flat -- leave the existing path untouched
+
+        components = {}
+        nets = {}
+        name_collisions = []
+        self.flattened_ref_map = {}
+
+        def visit(circ, path):
+            for comp in self._iter_values(getattr(circ, "components", {})):
+                ref = getattr(comp, "ref", None)
+                if ref is None:
+                    continue
+                if ref in components and components[ref] is not comp:
+                    new_ref = f"{ref}_{len(components)}"
+                    while new_ref in components:
+                        new_ref = f"{new_ref}_x"
+                    self.flattened_ref_map[new_ref] = (circ.name, ref)
+                    comp.ref = new_ref  # live -> updates str(pin) used for matching
+                    ref = new_ref
+                components[ref] = comp
+            for net in self._iter_values(getattr(circ, "nets", {})):
+                name = getattr(net, "name", str(net))
+                existing = nets.get(name)
+                if existing is None:
+                    nets[name] = net
+                elif existing is not net:
+                    name_collisions.append(name)
+            for sub in getattr(circ, "_subcircuits", []) or []:
+                visit(sub, path + [getattr(sub, "name", "?")])
+
+        visit(circuit, [getattr(circuit, "name", "Circuit")])
+
+        if name_collisions:
+            logger.warning(
+                "Flattening hierarchy: distinct nets share name(s) %s and will "
+                "be treated as one SPICE node -- rename them to disambiguate.",
+                sorted(set(name_collisions)),
+            )
+        logger.info(
+            "Flattened hierarchy for simulation: %d component(s), %d net(s)",
+            len(components),
+            len(nets),
+        )
+        return self._FlatCircuit(getattr(circuit, "name", "Circuit"), components, nets)
 
     def convert(self, strict: bool = True) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit.
@@ -120,6 +209,11 @@ class SpiceConverter:
         """
         if not PYSPICE_AVAILABLE:
             raise ImportError("PySpice not available")
+
+        # Hierarchical designs place their components/nets in subcircuits; the
+        # converter iterates only self.circuit, so flatten first. No-op for a
+        # flat circuit. (See _flatten for the identity/collision handling.)
+        self.circuit = self._flatten(self.circuit)
 
         if strict:
             self.validate()
@@ -377,8 +471,12 @@ class SpiceConverter:
         if kind == "diode":
             return "DefaultDiode"
         if kind == "bjt":
-            return "DefaultPNP" if ("pnp" in symbol or device == "pnp") else "DefaultNPN"
-        return "DefaultPMOS" if ("pmos" in symbol or device == "pmos") else "DefaultNMOS"
+            return (
+                "DefaultPNP" if ("pnp" in symbol or device == "pnp") else "DefaultNPN"
+            )
+        return (
+            "DefaultPMOS" if ("pmos" in symbol or device == "pmos") else "DefaultNMOS"
+        )
 
     @staticmethod
     def _parse_sim_params(spec) -> dict:
@@ -625,10 +723,7 @@ class SpiceConverter:
         sym_node = self._symbol_pin_nodes(component)
         mapping = self._parse_sim_pins(pins_spec)
         if not mapping:
-            return [
-                sym_node[k]
-                for k in sorted(sym_node, key=self._pin_sort_key)
-            ]
+            return [sym_node[k] for k in sorted(sym_node, key=self._pin_sort_key)]
         pos_node = {}
         for sym_pin, target in mapping.items():
             node = sym_node.get(str(sym_pin))
