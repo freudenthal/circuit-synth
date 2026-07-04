@@ -23,6 +23,8 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   measurable, define at minimum: schematic generates, ERC-relevant connectivity
   is sane, expected component count.
 - List every component with its intended KiCad `symbol=` and `footprint=` id.
+  For a multi-sheet design (see Phase 3), group the component list by sheet
+  (`### Sheet: psu`, `### Sheet: amp`, ...) so the hierarchy is visible in the log.
 - Write all of this into `design_log.md` under `## Iteration N — plan`.
 
 ## Phase 2 — DISCOVER (symbol/footprint resolution)
@@ -57,6 +59,35 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   names auto-become power symbols), `component[pin] += net`.
 - In `__main__`: `generate_kicad_project(project_name=..., generate_pcb=False)`.
   Do NOT call gerber functions (unavailable in this build).
+- **Multi-sheet / hierarchical designs.** Split into sheets when the design has
+  distinct functional blocks (power, MCU, analog front-end, ...), the user asks
+  for it, or it exceeds ~15 components. Pattern: write one `@circuit` function
+  per block, and a top `@circuit` that creates the *shared* nets and calls each
+  block, **passing the same `Net` objects** into the blocks that must connect:
+
+  ```python
+  @circuit(name="psu")
+  def psu(vin, v5, gnd): ...        # components here land on the psu sheet
+
+  @circuit(name="amp")
+  def amp(v5, gnd, sig_in, sig_out): ...
+
+  @circuit(name="main")
+  def main():
+      vin, v5, gnd = Net("VIN_9V"), Net("V5"), Net("GND")
+      sig_in, sig_out = Net("SIG_IN"), Net("SIG_OUT")
+      psu(vin, v5, gnd)             # auto-registered as a child sheet
+      amp(v5, gnd, sig_in, sig_out) # V5/GND shared by object identity
+  ```
+
+  Generation emits one `.kicad_sch` per block plus the root; a net shared
+  between two or more blocks becomes a **sheet pin** on each (e.g. `V5`), while
+  power nets (`GND`/`VCC*`) use global power symbols, not pins. A net used
+  inside only one block stays local to that sheet — so to expose a block's I/O,
+  share that net with the top or another block. See
+  `tools/hierarchical_example.py` for a runnable two-sheet reference.
+- Simulation flattens the hierarchy automatically; measure nodes by net name as
+  usual (`result.get_voltage("V5")`) — no special handling needed.
 
 ## Phase 4 — GENERATE
 - Run: `PYTHONUTF8=1 uv run python circuit-synth/<name>.py`
