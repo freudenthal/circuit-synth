@@ -231,6 +231,7 @@ markers = [
     "asyncio: marks tests as async/await tests",
     "functional: marks tests as functional tests",
     "cache: marks tests as cache-related tests",
+    "requires_pcb: needs the optional kicad_pcb_api PCB backend (skipped if absent)",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
