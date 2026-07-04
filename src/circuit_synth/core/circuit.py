@@ -804,8 +804,7 @@ class Circuit:
                         wire_result = wire_local_nets(str(root_sch))
                         success_result["selective_wires"] = wire_result
                         context_logger.info(
-                            "Selective wiring drew %d wire(s)",
-                            wire_result.get("wires_drawn", 0),
+                            f"Selective wiring drew {wire_result.get('wires_drawn', 0)} wire(s)",
                             component="CIRCUIT",
                         )
                     except Exception as e:  # never fail generation over a cosmetic pass
@@ -822,10 +821,9 @@ class Circuit:
                         report = run_erc_gate(str(root_sch))
                         success_result["erc_report"] = report
                         context_logger.info(
-                            "ERC gate: %d error(s), %d warning(s), %d autofix(es)",
-                            report.error_count,
-                            report.warning_count,
-                            report.autofixes_applied,
+                            f"ERC gate: {report.error_count} error(s), "
+                            f"{report.warning_count} warning(s), "
+                            f"{report.autofixes_applied} autofix(es)",
                             component="CIRCUIT",
                         )
                     except ErcUnavailable as e:
