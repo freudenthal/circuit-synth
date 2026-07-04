@@ -184,6 +184,15 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `Sim.Name="MODEL"` (+ optional `Sim.Pins="1=out 2=inp 3=inn"`) attaches an external
   vendor `.lib`/`.subckt` model verbatim. Pass dotted names as
   `Component(..., **{"Sim.Enable": "0"})`.
+- **Keeping a part out of the BOM (KiCad `in_bom`):** `Sim.Enable="0"` is *not* a BOM
+  control — a real part can be sim-disabled yet still belong in the BOM. Two BOM
+  exclusions apply automatically: `Simulation_SPICE:*` stimulus symbols (voltage/
+  current sources) are never BOM parts, and any component whose value is DNP is
+  dropped. For a **model-only passive** that has no physical part (e.g. a device's
+  internal terminal capacitance you add just so the sim sees it), pass
+  `Component(..., in_bom=False)` to emit KiCad's native `(in_bom no)` so
+  `generate_bom()` omits it. `generate_bom()` also auto-adds any attached
+  `MPN`/`Manufacturer`/`Distributor`/`LCSC` columns — no `fields=` needed.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install is needed.
 - **Save a plot of the result** so the log is visual, not just numbers. Every

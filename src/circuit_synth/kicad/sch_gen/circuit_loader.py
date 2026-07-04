@@ -241,6 +241,21 @@ def _parse_circuit(circ_data: dict, sub_dict: Dict[str, Circuit]) -> Circuit:
         # Handle DNP special case: KiCad has built-in dnp attribute
         dnp_value = extract_dnp_value(comp_dict)
 
+        # Determine BOM inclusion (stage 17.4, G5). Precedence:
+        #   1. explicit Component(in_bom=False) kwarg (rides as a top-level field),
+        #   2. Simulation_SPICE:* stimulus symbols (e.g. an ISIN current source) are
+        #      simulation-only, not physical BOM parts -> exclude natively,
+        #   3. DNP.
+        # Excluded parts get KiCad's native (in_bom no) so `kicad-cli sch export bom`
+        # drops them without a post-filter.
+        explicit_in_bom = comp_dict.get("in_bom", None)
+        if explicit_in_bom is not None:
+            in_bom_flag = bool(explicit_in_bom) and not dnp_value
+        elif symbol_id.startswith("Simulation_SPICE:"):
+            in_bom_flag = False
+        else:
+            in_bom_flag = not dnp_value
+
         # Create SchematicSymbol with properties
         # NOTE: kicad-sch-api SchematicSymbol doesn't support dnp parameter yet
         # DNP is written as a property for now. in_bom/on_board flags can be set based on DNP.
@@ -254,7 +269,7 @@ def _parse_circuit(circ_data: dict, sub_dict: Dict[str, Circuit]) -> Circuit:
             properties=properties,  # FIXED: Use extracted properties instead of hardcoded
             pins=[],
             uuid=str(uuid_module.uuid4()),
-            in_bom=not dnp_value,  # If DNP, exclude from BOM
+            in_bom=in_bom_flag,
             on_board=not dnp_value,  # If DNP, exclude from board
         )
 

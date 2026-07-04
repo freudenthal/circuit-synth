@@ -872,6 +872,32 @@ class Circuit:
                 "error": error_msg,
             }
 
+    # Sourcing fields that ride as KiCad component properties (see Stage 10 Part B).
+    # Order is stable so the auto-generated BOM columns are deterministic.
+    _SOURCING_FIELDS = ("MPN", "Manufacturer", "Distributor", "LCSC")
+
+    def _detect_sourcing_fields(self) -> list:
+        """Return the sourcing fields (in stable order) attached to any component.
+
+        Scans this circuit and all subcircuits. A field counts as present if any
+        component carries it in ``_extra_fields`` (how ``Component(MPN=...)`` kwargs
+        are stored) or in its ``properties`` dict.
+        """
+        found = set()
+
+        def scan(circuit):
+            for comp in circuit._components.values():
+                extra = getattr(comp, "_extra_fields", {}) or {}
+                props = getattr(comp, "properties", {}) or {}
+                for f in self._SOURCING_FIELDS:
+                    if f in extra or f in props:
+                        found.add(f)
+            for sub in getattr(circuit, "_subcircuits", []):
+                scan(sub)
+
+        scan(self)
+        return [f for f in self._SOURCING_FIELDS if f in found]
+
     def generate_bom(
         self,
         output_file: Optional[str] = None,
@@ -964,6 +990,22 @@ class Circuit:
                     component="CIRCUIT",
                     project_path=str(project_path),
                 )
+
+            # When no explicit fields are requested, auto-include any attached
+            # sourcing fields (MPN/Manufacturer/Distributor/LCSC) so they aren't
+            # silently dropped from KiCad's default BOM columns (stage 17.4, G5).
+            # Explicit fields= always wins.
+            if fields is None:
+                present = self._detect_sourcing_fields()
+                if present:
+                    fields = "Reference,Value,Footprint,QUANTITY,DNP," + ",".join(
+                        present
+                    )
+                    labels = "Refs,Value,Footprint,Qty,DNP," + ",".join(present)
+                    context_logger.info(
+                        f"BOM: auto-including sourcing columns {present}",
+                        component="CIRCUIT",
+                    )
 
             # Export BOM using kicad-cli
             context_logger.info(
