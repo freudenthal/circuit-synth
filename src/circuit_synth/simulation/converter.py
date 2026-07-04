@@ -38,6 +38,30 @@ class SimulationValidationError(ValueError):
 class SpiceConverter:
     """Converts circuit-synth circuits to PySpice format."""
 
+    # Built-in generic SPICE model cards, keyed by model name. Each entry is
+    # (ngspice device type, params dict). These back the ``Default*`` names the
+    # device handlers assign, so any diode/BJT/MOSFET is simulatable out of the box
+    # without a vendor model; a device's ``value=`` may also name one of these
+    # built-ins directly. Only models a circuit actually uses are emitted (see
+    # ``_emit_models``). Params are deliberately generic (textbook silicon values).
+    GENERIC_MODELS = {
+        "DefaultDiode": ("D", {"IS": 1e-14, "RS": 0.1, "N": 1.0, "CJO": 2e-12}),
+        "DefaultNPN": ("NPN", {"BF": 100, "IS": 1e-14, "VAF": 100}),
+        "DefaultPNP": ("PNP", {"BF": 100, "IS": 1e-14, "VAF": 100}),
+        "DefaultNMOS": ("NMOS", {"VTO": 1.0, "KP": 2e-5, "LAMBDA": 0.02}),
+        "DefaultPMOS": ("PMOS", {"VTO": -1.0, "KP": 2e-5, "LAMBDA": 0.02}),
+    }
+
+    # A bare device-type keyword in ``value`` selects the matching generic model,
+    # so ``value="pnp"`` is treated as a type hint rather than a literal model name.
+    _TYPE_KEYWORD_MODELS = {
+        "npn": "DefaultNPN",
+        "pnp": "DefaultPNP",
+        "nmos": "DefaultNMOS",
+        "pmos": "DefaultPMOS",
+        "diode": "DefaultDiode",
+    }
+
     def __init__(self, circuit_synth_circuit):
         self.circuit = circuit_synth_circuit
         self.spice_circuit = None
@@ -47,6 +71,9 @@ class SpiceConverter:
         # ...). _add_power_sources skips these so the net-name heuristic never adds a
         # second, conflicting supply on a net an explicit source already drives.
         self.driven_nets = set()
+        # Model names referenced by diode/BJT/MOSFET devices; a matching .model card
+        # is emitted for each that resolves to a built-in generic (see _emit_models).
+        self.used_models = set()
 
     def convert(self, strict: bool = True) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit.
@@ -74,6 +101,9 @@ class SpiceConverter:
 
         # Add components to SPICE circuit
         self._add_components()
+
+        # Emit .model cards for the semiconductor models the components referenced.
+        self._emit_models()
 
         # Add power sources (voltage/current sources)
         self._add_power_sources()
@@ -215,6 +245,46 @@ class SpiceConverter:
         self.spice_circuit.L(ref, nodes[0], nodes[1], spice_value)
         logger.debug(f"Added inductor {ref}: {nodes[0]} -> {nodes[1]} = {spice_value}")
 
+    def _device_model_name(self, component) -> Optional[str]:
+        """Model name a diode/BJT/MOSFET references (shared by handlers + validate).
+
+        Returns ``None`` if the component is not a modelled semiconductor. A bare
+        type keyword in ``value`` (``'npn'``/``'pmos'``/...) selects the matching
+        generic; an empty ``value`` falls back to the ``Default*`` generic implied
+        by the symbol's polarity; any other ``value`` is used verbatim as the model
+        name (which ``validate`` then checks resolves to a built-in).
+        """
+        kind = self._classify(self._attr(component, "symbol", ""))
+        if kind not in ("diode", "bjt", "mosfet"):
+            return None
+        symbol = str(self._attr(component, "symbol", "")).lower()
+        value = self._attr(component, "value", None)
+        v = str(value).strip().lower() if value else ""
+        if v in self._TYPE_KEYWORD_MODELS:
+            return self._TYPE_KEYWORD_MODELS[v]
+        if value:
+            return str(value)
+        if kind == "diode":
+            return "DefaultDiode"
+        if kind == "bjt":
+            return "DefaultPNP" if "pnp" in symbol else "DefaultNPN"
+        return "DefaultPMOS" if "pmos" in symbol else "DefaultNMOS"
+
+    def _emit_models(self):
+        """Emit a ``.model`` card for each referenced built-in generic model.
+
+        Only models actually used by a component are emitted (PySpice would
+        otherwise serialize every registered model). Unresolved custom model names
+        are left to ``validate`` to report; in the lenient path they simply have no
+        card (ngspice then errors on them, as before)."""
+        for name in sorted(self.used_models):
+            spec = self.GENERIC_MODELS.get(name)
+            if spec is None:
+                continue
+            device_type, params = spec
+            self.spice_circuit.model(name, device_type, **params)
+            logger.debug(f"Emitted .model {name} {device_type}")
+
     def _add_diode(self, component, ref: str, value: str):
         """Add diode to SPICE circuit."""
         nodes = self._get_component_nodes(component)
@@ -222,8 +292,8 @@ class SpiceConverter:
             logger.warning(f"Diode {ref} needs 2 connections, got {len(nodes)}")
             return
 
-        # Use default diode model
-        model_name = value or "DefaultDiode"
+        model_name = self._device_model_name(component) or "DefaultDiode"
+        self.used_models.add(model_name)
         self.spice_circuit.D(ref, nodes[0], nodes[1], model=model_name)
         logger.debug(f"Added diode {ref}: {nodes[0]} -> {nodes[1]} model={model_name}")
 
@@ -300,10 +370,9 @@ class SpiceConverter:
             logger.warning(f"BJT {ref} needs 3 connections (C,B,E), got {len(nodes)}")
             return
 
-        # Determine if NPN or PNP from symbol or value
-        model_name = value or "DefaultNPN"
-        if "pnp" in str(component.symbol).lower() or "pnp" in str(value).lower():
-            model_name = value or "DefaultPNP"
+        # Determine model (NPN/PNP) from value keyword or symbol polarity.
+        model_name = self._device_model_name(component) or "DefaultNPN"
+        self.used_models.add(model_name)
 
         # Add transistor (collector, base, emitter)
         self.spice_circuit.Q(ref, nodes[0], nodes[1], nodes[2], model=model_name)
@@ -320,10 +389,9 @@ class SpiceConverter:
             )
             return
 
-        # Determine NMOS or PMOS from symbol or value
-        model_name = value or "DefaultNMOS"
-        if "pmos" in str(component.symbol).lower() or "pmos" in str(value).lower():
-            model_name = value or "DefaultPMOS"
+        # Determine model (NMOS/PMOS) from value keyword or symbol polarity.
+        model_name = self._device_model_name(component) or "DefaultNMOS"
+        self.used_models.add(model_name)
 
         # Add MOSFET (drain, gate, source, bulk - bulk defaults to source if not provided)
         if len(nodes) >= 4:
@@ -757,6 +825,20 @@ class SpiceConverter:
                 problems.append(
                     f"{ref}: op-amp needs >=3 connected pins (in+, in-, out), "
                     f"found {count}"
+                )
+
+        # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
+        #    built-in generic (otherwise ngspice errors on an undefined model).
+        for component in self._iter_components():
+            model = self._device_model_name(component)
+            if model is None:
+                continue
+            if model not in self.GENERIC_MODELS:
+                ref = self._attr(component, "ref", None) or "?"
+                known = ", ".join(sorted(self.GENERIC_MODELS))
+                problems.append(
+                    f"{ref}: references SPICE model '{model}' with no .model card "
+                    f"(no matching built-in; known generics: {known})"
                 )
 
         if problems:
