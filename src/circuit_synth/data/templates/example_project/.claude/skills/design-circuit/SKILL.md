@@ -79,6 +79,12 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   DC supply, `VSIN` for AC/transient stimulus. Pin 1 is `+`, pin 2 is `-`. Do NOT
   use `Device:V`/`Device:I` (not real KiCad symbols). An explicit source overrides
   the net-name rail heuristic on the nets it drives.
+- **Transient stimulus:** pass waveform parameters as component kwargs (they are
+  stored as extra fields). `VSIN` reads `amplitude`/`frequency`/`offset`; `VPULSE`
+  reads `v1`/`v2`/`td`/`tr`/`tf`/`pw`/`per`; `VPWL` reads `points` (a string or a
+  list of `(t, v)` pairs). Keep SI suffixes (`1k`/`1m`/`1u`/`1n`) — ngspice parses
+  them. Run with `sim.transient_analysis(step_s, end_s)`; an optional `options={...}`
+  (e.g. `reltol`/`abstol`/`gmin`) tunes ngspice convergence on any analysis.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install is needed.
 - If simulation errors out or the backend is unavailable (the helper prints

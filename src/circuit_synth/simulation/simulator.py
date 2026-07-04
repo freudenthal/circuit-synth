@@ -263,14 +263,27 @@ class CircuitSimulator:
         converter = SpiceConverter(self.circuit_synth_circuit)
         self.spice_circuit = converter.convert()
 
-    def operating_point(self, temperature: float = 25) -> SimulationResult:
-        """Run DC operating point analysis."""
+    def _make_simulator(self, temperature: float, options: Optional[Dict] = None):
+        """Build a PySpice simulator with temperature and optional ngspice options.
+
+        ``options`` maps ngspice ``.options`` names to values (e.g.
+        ``{"reltol": 1e-3, "abstol": 1e-9, "gmin": 1e-12}``) for convergence /
+        accuracy tuning; omit for ngspice defaults.
+        """
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
-
         simulator = self.spice_circuit.simulator(
             temperature=temperature, nominal_temperature=temperature
         )
+        if options:
+            simulator.options(**options)
+        return simulator
+
+    def operating_point(
+        self, temperature: float = 25, options: Optional[Dict] = None
+    ) -> SimulationResult:
+        """Run DC operating point analysis."""
+        simulator = self._make_simulator(temperature, options)
         analysis = simulator.operating_point()
 
         return SimulationResult(analysis, "dc_op")
@@ -282,14 +295,10 @@ class CircuitSimulator:
         stop: float,
         step: float,
         temperature: float = 25,
+        options: Optional[Dict] = None,
     ) -> SimulationResult:
         """Run DC sweep analysis."""
-        if not self.spice_circuit:
-            raise RuntimeError("SPICE circuit not initialized")
-
-        simulator = self.spice_circuit.simulator(
-            temperature=temperature, nominal_temperature=temperature
-        )
+        simulator = self._make_simulator(temperature, options)
         analysis = simulator.dc(**{source: slice(start, stop, step)})
 
         return SimulationResult(analysis, "dc_sweep")
@@ -300,14 +309,10 @@ class CircuitSimulator:
         stop_freq: float,
         points: int = 100,
         temperature: float = 25,
+        options: Optional[Dict] = None,
     ) -> SimulationResult:
         """Run AC analysis."""
-        if not self.spice_circuit:
-            raise RuntimeError("SPICE circuit not initialized")
-
-        simulator = self.spice_circuit.simulator(
-            temperature=temperature, nominal_temperature=temperature
-        )
+        simulator = self._make_simulator(temperature, options)
         analysis = simulator.ac(
             start_frequency=start_freq @ u_Hz,
             stop_frequency=stop_freq @ u_Hz,
@@ -318,15 +323,14 @@ class CircuitSimulator:
         return SimulationResult(analysis, "ac")
 
     def transient_analysis(
-        self, step_time: float, end_time: float, temperature: float = 25
+        self,
+        step_time: float,
+        end_time: float,
+        temperature: float = 25,
+        options: Optional[Dict] = None,
     ) -> SimulationResult:
         """Run transient analysis."""
-        if not self.spice_circuit:
-            raise RuntimeError("SPICE circuit not initialized")
-
-        simulator = self.spice_circuit.simulator(
-            temperature=temperature, nominal_temperature=temperature
-        )
+        simulator = self._make_simulator(temperature, options)
         analysis = simulator.transient(
             step_time=step_time @ u_s, end_time=end_time @ u_s
         )

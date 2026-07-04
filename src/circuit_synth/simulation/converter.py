@@ -413,10 +413,21 @@ class SpiceConverter:
     def _add_voltage_source(self, component, ref: str, value: str):
         """Add voltage source to SPICE circuit.
 
-        A ``Simulation_SPICE:VAC``/``VSIN`` source is given an AC magnitude so
-        the node it drives becomes the transfer function during ``ac_analysis``
-        (default 1 V, so |V(out)| == |H(f)|). ``VDC`` keeps its DC-only value.
-        The AC magnitude / DC offset are parsed from ``value`` when present.
+        The emitted SPICE spec depends on the KiCad symbol:
+
+        * ``VDC`` -> a DC value (from ``value``, default 5 V).
+        * ``VAC`` -> ``DC 0 AC <mag>`` (small-signal only; ``value`` is the AC mag).
+        * ``VSIN`` -> ``DC <off> AC <acmag> SIN(<off> <ampl> <freq> <td> <theta>)``
+          -- both AC-analysis magnitude *and* a transient sinusoid, so one source
+          works for both `.ac` and `.tran`. ``value`` sets ampl+acmag by default.
+        * ``VPULSE`` -> ``PULSE(<v1> <v2> <td> <tr> <tf> <pw> <per>)``.
+        * ``VPWL`` -> ``PWL(<t1> <v1> <t2> <v2> ...)`` (from a ``points`` field).
+
+        Waveform parameters are read from the component's extra fields (any kwarg
+        passed to ``Component`` lands in ``_extra_fields``), e.g.
+        ``Component(symbol="Simulation_SPICE:VSIN", amplitude="1", frequency="1k")``.
+        Numeric values keep their SI suffix (``1k``/``1m``/``1u``/``1n``) -- ngspice
+        parses those directly.
         """
         nodes = self._get_component_nodes(component)
         if len(nodes) < 2:
@@ -430,26 +441,112 @@ class SpiceConverter:
         # Mark this source's nets so the net-name heuristic won't double-drive them.
         self.driven_nets.update(self._component_net_names(component))
 
-        symbol = getattr(component, "symbol", "") or ""
-        is_ac = "VAC" in symbol.upper() or "VSIN" in symbol.upper()
+        symbol = (getattr(component, "symbol", "") or "").upper()
+        params = self._source_params(component)
+        spec = self._voltage_source_spec(symbol, value, params)
 
         # nodes[] is in pin-number order, so nodes[0] is pin 1 (KiCad Sim.Pins
         # "1=+") and nodes[1] is pin 2 ("2=-"): V(name, +, -, spec).
-        if is_ac:
-            # AC source: the value (if given) is the AC magnitude; DC offset 0 so
-            # only the small-signal response appears. Emit "DC 0 AC <mag>".
+        self.spice_circuit.V(ref, nodes[0], nodes[1], spec)
+        logger.debug(
+            f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {spec}"
+        )
+
+    @staticmethod
+    def _source_params(component) -> dict:
+        """Lowercased extra-field map for waveform params (empty if none)."""
+        extra = getattr(component, "_extra_fields", None)
+        if not isinstance(extra, dict):
+            return {}
+        return {str(k).lower(): v for k, v in extra.items()}
+
+    @staticmethod
+    def _wave_num(value, default: str) -> str:
+        """Normalize a waveform number, keeping its SI suffix for ngspice.
+
+        Strips a trailing unit (V/A/Hz/s/F/H) so ``"1kHz"`` -> ``"1k"`` and
+        ``"5V"`` -> ``"5"`` while leaving the SI prefix (k/m/u/n/p) intact.
+        Returns ``default`` when ``value`` is None/empty.
+        """
+        if value is None:
+            return default
+        s = str(value).strip()
+        if not s:
+            return default
+        for unit in ("hz", "v", "a", "s", "f", "h"):
+            if len(s) > len(unit) and s.lower().endswith(unit):
+                s = s[: -len(unit)]
+                break
+        return s
+
+    def _pick(self, params: dict, keys, default: str) -> str:
+        """First present param among ``keys`` (normalized), else ``default``."""
+        for k in keys:
+            if k in params and params[k] is not None and str(params[k]).strip():
+                return self._wave_num(params[k], default)
+        return default
+
+    def _voltage_source_spec(self, symbol: str, value, params: dict):
+        """Build the SPICE source spec (string or float) from symbol + params."""
+        if "VPULSE" in symbol:
+            v1 = self._pick(params, ("v1", "initial", "low"), "0")
+            v2 = self._pick(
+                params,
+                ("v2", "pulsed", "high", "amplitude"),
+                self._wave_num(value, "1"),
+            )
+            td = self._pick(params, ("td", "delay"), "0")
+            tr = self._pick(params, ("tr", "rise"), "1n")
+            tf = self._pick(params, ("tf", "fall"), "1n")
+            pw = self._pick(params, ("pw", "width"), "0.5m")
+            per = self._pick(params, ("per", "period"), "1m")
+            return f"PULSE({v1} {v2} {td} {tr} {tf} {pw} {per})"
+
+        if "VPWL" in symbol:
+            pts = self._pwl_points(params)
+            if pts:
+                return f"PWL({pts})"
+            # No points given -> degrade to a DC source at `value` (or 0).
+            return self._convert_value_to_spice(value or "0V", "V")
+
+        if "VSIN" in symbol:
+            base = self._wave_num(value, "1")  # value sets ampl + AC mag by default
+            offset = self._pick(params, ("offset", "dc", "voffset"), "0")
+            ampl = self._pick(params, ("amplitude", "ampl", "amp"), base)
+            freq = self._pick(params, ("frequency", "freq", "f"), "1k")
+            td = self._pick(params, ("td", "delay"), "0")
+            theta = self._pick(params, ("theta", "damping"), "0")
+            ac_mag = self._pick(params, ("ac", "ac_mag", "acmag"), base)
+            return f"DC {offset} AC {ac_mag} SIN({offset} {ampl} {freq} {td} {theta})"
+
+        if "VAC" in symbol:
             ac_mag = self._convert_value_to_spice(value, "V") if value else 1.0
-            self.spice_circuit.V(ref, nodes[0], nodes[1], f"DC 0 AC {ac_mag}")
-            logger.debug(
-                f"Added AC voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) "
-                f"= DC 0 AC {ac_mag}"
-            )
-        else:
-            voltage = self._convert_value_to_spice(value or "5V", "V")
-            self.spice_circuit.V(ref, nodes[0], nodes[1], voltage)
-            logger.debug(
-                f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {voltage}V"
-            )
+            return f"DC 0 AC {ac_mag}"
+
+        # VDC / default: a plain DC value.
+        return self._convert_value_to_spice(value or "5V", "V")
+
+    def _pwl_points(self, params: dict) -> str:
+        """Render VPWL points ('t1 v1 t2 v2 ...') from a ``points`` field.
+
+        Accepts a list/tuple of (t, v) pairs, a flat list, or a whitespace/
+        comma-separated string. Returns '' if no usable points are present.
+        """
+        pts = params.get("points")
+        if pts is None:
+            return ""
+        if isinstance(pts, str):
+            toks = [t for t in pts.replace(",", " ").split() if t]
+            return " ".join(self._wave_num(t, "0") for t in toks)
+        if isinstance(pts, (list, tuple)):
+            flat = []
+            for item in pts:
+                if isinstance(item, (list, tuple)):
+                    flat.extend(item)
+                else:
+                    flat.append(item)
+            return " ".join(self._wave_num(t, "0") for t in flat)
+        return ""
 
     def _add_current_source(self, component, ref: str, value: str):
         """Add current source to SPICE circuit."""
