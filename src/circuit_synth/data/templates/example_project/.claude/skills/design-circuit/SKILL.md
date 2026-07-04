@@ -68,6 +68,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
     the schematic (same mechanism as `Sim.*`); no schema change needed.
 
 ## Phase 3 — WRITE
+<!-- language-coupled: this WRITE step teaches the circuit_synth DSL (@circuit / Net / generate_kicad_project). A future DSL swap repoints this section only; see workingdocs/loop-boundary-contract.md rule R3. -->
 - Create/modify `circuit-synth/<snake_case_name>.py` following `main.py`'s
   pattern: `@circuit(name=...)`, `Net(...)` for connections (GND/VCC-style
   names auto-become power symbols), `component[pin] += net`.
@@ -102,6 +103,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `tools/hierarchical_example.py` for a runnable two-sheet reference.
 - Simulation flattens the hierarchy automatically; measure nodes by net name as
   usual (`result.get_voltage("V5")`) — no special handling needed.
+<!-- /language-coupled -->
 
 ## Phase 4 — GENERATE
 - Run: `PYTHONUTF8=1 uv run python circuit-synth/<name>.py`
@@ -120,6 +122,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 | Gerber/PCB errors | Ignore — unavailable feature; ensure `generate_pcb=False` |
 
 ## Phase 5 — SIMULATE
+<!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/loop-boundary-contract.md rule R3. -->
 - **DC / operating point:** follow the working pattern in
   `tools/simulate_example.py` to run an operating-point analysis of your circuit
   and capture node voltages for every net named in the acceptance criteria. The
@@ -182,6 +185,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   recompute expected values by hand (Ohm's law, divider ratios), confirm net
   connectivity in the `.kicad_sch`, and mark the iteration
   "**not simulation-verified**" in `design_log.md`. Never fabricate measurements.
+<!-- /language-coupled -->
 
 ## Phase 6 — EXAMINE & DECIDE
 - Compare each measurement to its criterion → PASS/FAIL table in `design_log.md`.
@@ -210,6 +214,7 @@ the Python file**, not the `.kicad_sch` — every downstream step (simulation,
 edits must go there. In-place edits to the generated `.kicad_sch` are invisible
 to those steps and are **overwritten the next time the project is regenerated**.
 
+<!-- language-coupled: the edit steps operate on the circuit_synth Python source (generate_kicad_project / force_regenerate update mode). See workingdocs/loop-boundary-contract.md rule R3. -->
 1. **Locate the source.** Find the `circuit-synth/*.py` whose
    `generate_kicad_project(project_name=...)` matches the project the user means
    (usually `main.py` or the one named after the target). If several could
@@ -233,6 +238,7 @@ to those steps and are **overwritten the next time the project is regenerated**.
    regeneration result (updated/preserved/added), the new measurements vs. the
    criteria (PASS/FAIL), and an embedded plot if you produced one.
 5. **Iterate** as in Phase 6 if the edit didn't meet its criterion.
+<!-- /language-coupled -->
 
 **MCP boundary.** The kicad-sch-api MCP server (if connected) stays a
 **read-only helper** in this loop — pin lookups (`get_component_pins`,
