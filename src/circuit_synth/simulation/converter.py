@@ -7,9 +7,26 @@ to SPICE netlists that can be simulated with PySpice/ngspice.
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ResolvedModel:
+    """Which model tier a device's SPICE ``.model`` was resolved from.
+
+    Recorded per device so callers can see -- and log -- that a part simulated
+    with datasheet-fit params, a textbook generic, or an external vendor model,
+    rather than a generic being silently passed off as the real part.
+    """
+
+    ref: str
+    kind: str  # diode | bjt | mosfet
+    tier: str  # datasheet_fit | generic | vendor_lib | unresolved
+    name: str  # the resolved model/base name
+    overridden: bool = False  # True if Sim.Params overlaid a derived card
 
 try:
     from PySpice.Spice.Netlist import Circuit as SpiceCircuit
@@ -79,6 +96,12 @@ class SpiceConverter:
         # do not collide. Each value is (device_type, params). Emitted alongside
         # the built-in generics in _emit_models.
         self.derived_models = {}
+        # Datasheet-fit model cards pulled from the built-in ModelLibrary and
+        # actually referenced by a device, keyed by model name -> (device_type,
+        # params). Emitted in _emit_models (GENERIC_MODELS covers only generics).
+        self.library_models = {}
+        # ref -> ResolvedModel: which tier each active device's model came from.
+        self.model_provenance = {}
 
     def convert(self, strict: bool = True) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit.
@@ -364,34 +387,86 @@ class SpiceConverter:
         except (TypeError, ValueError):
             return value
 
-    def _resolve_device_model(self, component, ref) -> Optional[str]:
-        """Model name a device instance should reference, applying Sim.Params.
+    # SPICE model_type (from the built-in ModelLibrary) -> our device kind, used to
+    # reject attaching e.g. an NPN model card to a diode.
+    _MODEL_TYPE_TO_KIND = {
+        "D": "diode",
+        "NPN": "bjt",
+        "PNP": "bjt",
+        "NMOS": "mosfet",
+        "PMOS": "mosfet",
+    }
 
-        Without overrides this is just ``_device_model_name`` (registered in
-        ``used_models`` for card emission). With a ``Sim.Params`` override on a
-        built-in base, a per-device derived card (``{base}_{ref}``) is synthesized
-        so the override is local to this device. Returns None for non-semiconductors.
+    def _lookup_model_spec(self, name, kind):
+        """Resolve a model name through the ladder -> ((device_type, params), tier).
+
+        Tier is ``generic`` (built-in ``Default*``), ``datasheet_fit`` (a matching
+        entry in the built-in ``ModelLibrary``), or ``unresolved`` (unknown, or a
+        library entry whose device type is wrong for ``kind``). Returns
+        ``(None, "unresolved")`` in the last case so validate() can report it.
         """
-        base = self._device_model_name(component)
-        if base is None:
+        if name in self.GENERIC_MODELS:
+            device_type, params = self.GENERIC_MODELS[name]
+            return (device_type, dict(params)), "generic"
+        try:
+            from .models import get_model_library
+
+            entry = get_model_library().get_model(name)
+        except Exception:  # pragma: no cover - library import/init failure
+            entry = None
+        if entry is not None:
+            mtype = str(entry.model_type).upper()
+            if self._MODEL_TYPE_TO_KIND.get(mtype) == kind:
+                return (entry.model_type, dict(entry.parameters)), "datasheet_fit"
+        return None, "unresolved"
+
+    def _resolve_device_model(self, component, ref) -> Optional[str]:
+        """Model name a device instance should reference; resolve tier + Sim.Params.
+
+        Resolves ``_device_model_name`` through the tiered ladder
+        (datasheet_fit -> generic), records provenance for the device, and applies
+        any ``Sim.Params`` override as a per-device derived card (``{base}_{ref}``)
+        so it can't collide with another part's overrides. Returns None for
+        non-semiconductors. An unresolved base is referenced verbatim (validate()
+        reports it) and recorded as tier ``unresolved``.
+        """
+        kind = self._kind(component)
+        if kind not in ("diode", "bjt", "mosfet"):
             return None
+        base = self._device_model_name(component)
+        spec, tier = self._lookup_model_spec(base, kind)
         overrides = self._parse_sim_params(self._sim_props(component).get("params"))
-        if not overrides:
-            self.used_models.add(base)
-            return base
-        spec = self.GENERIC_MODELS.get(base)
+
         if spec is None:
-            # Unknown base (validate() will flag it); can't synthesize a card
-            # without a device type, so reference the base verbatim.
-            self.used_models.add(base)
+            self.model_provenance[ref] = ResolvedModel(ref, kind, "unresolved", base)
             return base
+
         device_type, params = spec
+        self.model_provenance[ref] = ResolvedModel(
+            ref, kind, tier, base, overridden=bool(overrides)
+        )
+        logger.info(
+            f"{ref} ({base}): model tier={tier}"
+            + (" (+Sim.Params override)" if overrides else "")
+        )
+
+        if not overrides:
+            self._register_model_card(base, device_type, params, tier)
+            return base
+
         merged = dict(params)
         for key, val in overrides.items():
             merged[key] = self._coerce_param(val)
         derived = f"{base}_{ref}"
         self.derived_models[derived] = (device_type, merged)
         return derived
+
+    def _register_model_card(self, name, device_type, params, tier):
+        """Mark a model for emission by tier (generic -> built-in, else explicit)."""
+        if tier == "generic":
+            self.used_models.add(name)
+        else:  # datasheet_fit: emit the library's params explicitly
+            self.library_models[name] = (device_type, params)
 
     def _emit_models(self):
         """Emit a ``.model`` card for each referenced built-in and derived model.
@@ -407,10 +482,30 @@ class SpiceConverter:
             device_type, params = spec
             self.spice_circuit.model(name, device_type, **params)
             logger.debug(f"Emitted .model {name} {device_type}")
+        for name in sorted(self.library_models):
+            device_type, params = self.library_models[name]
+            self.spice_circuit.model(name, device_type, **params)
+            logger.debug(f"Emitted datasheet-fit .model {name} {device_type}")
         for name in sorted(self.derived_models):
             device_type, params = self.derived_models[name]
             self.spice_circuit.model(name, device_type, **params)
             logger.debug(f"Emitted derived .model {name} {device_type}")
+
+        # One honest summary line: which fidelity tier every active device got, so
+        # a textbook generic is never silently mistaken for the real part.
+        if self.model_provenance:
+            summary = ", ".join(
+                f"{r}={p.tier}" for r, p in sorted(self.model_provenance.items())
+            )
+            logger.info(f"Model provenance: {summary}")
+            generics = [
+                p.name for p in self.model_provenance.values() if p.tier == "generic"
+            ]
+            if generics:
+                logger.warning(
+                    "Simulating with textbook-generic models (not datasheet-fit) "
+                    f"for: {', '.join(sorted(set(generics)))}"
+                )
 
     def _add_diode(self, component, ref: str, value: str):
         """Add diode to SPICE circuit."""
@@ -1123,12 +1218,28 @@ class SpiceConverter:
             model = self._device_model_name(component)
             if model is None:
                 continue
-            if model not in self.GENERIC_MODELS:
-                ref = self._attr(component, "ref", None) or "?"
+            kind = self._kind(component)
+            spec, _tier = self._lookup_model_spec(model, kind)
+            if spec is not None:
+                continue
+            ref = self._attr(component, "ref", None) or "?"
+            # Distinguish a device-type mismatch from an entirely unknown name.
+            try:
+                from .models import get_model_library
+
+                entry = get_model_library().get_model(model)
+            except Exception:  # pragma: no cover
+                entry = None
+            if entry is not None:
+                problems.append(
+                    f"{ref}: model '{model}' is a {entry.model_type} but device is "
+                    f"{kind} (wrong model type)"
+                )
+            else:
                 known = ", ".join(sorted(self.GENERIC_MODELS))
                 problems.append(
                     f"{ref}: references SPICE model '{model}' with no .model card "
-                    f"(no matching built-in; known generics: {known})"
+                    f"(not in the model library; known generics: {known})"
                 )
 
         if problems:

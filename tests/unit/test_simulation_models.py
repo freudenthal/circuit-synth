@@ -163,13 +163,17 @@ def test_nmos_emits_nmos_model():
 
 
 def test_unresolved_model_raises():
-    """A device naming a model with no built-in card fails strict validation."""
+    """A device naming a model the ladder can't resolve fails strict validation.
+
+    (``1N4148`` now resolves to the datasheet-fit library card -- see Stage 9.2 --
+    so this uses a name that is in neither the generics nor the model library.)
+    """
 
     @circuit(name="BadModel")
     def bad():
         v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
         r1 = Component(symbol="Device:R", ref="R1", value="1k")
-        d1 = Component(symbol="Device:D", ref="D1", value="1N4148")  # not a built-in
+        d1 = Component(symbol="Device:D", ref="D1", value="NOSUCHPART9000")
         vin = Net("VIN")
         vn = Net("VN")
         gnd = Net("GND")
@@ -182,7 +186,7 @@ def test_unresolved_model_raises():
 
     with pytest.raises(SimulationValidationError) as exc:
         SpiceConverter(bad()).convert()
-    assert "1N4148" in str(exc.value)
+    assert "NOSUCHPART9000" in str(exc.value)
 
 
 def test_lenient_convert_skips_model_validation():
@@ -195,7 +199,7 @@ def test_lenient_convert_skips_model_validation():
     def bad():
         v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
         r1 = Component(symbol="Device:R", ref="R1", value="1k")
-        d1 = Component(symbol="Device:D", ref="D1", value="1N4148")
+        d1 = Component(symbol="Device:D", ref="D1", value="NOSUCHPART9000")
         vin = Net("VIN")
         vn = Net("VN")
         gnd = Net("GND")
@@ -208,7 +212,7 @@ def test_lenient_convert_skips_model_validation():
 
     netlist = str(SpiceConverter(bad()).convert(strict=False))
     assert "D1 " in netlist  # device line present
-    assert ".model 1N4148" not in netlist  # no card for the unknown model
+    assert ".model NOSUCHPART9000" not in netlist  # no card for the unknown model
 
 
 def _ngspice_loads() -> bool:

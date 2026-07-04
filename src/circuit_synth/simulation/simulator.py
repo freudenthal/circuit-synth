@@ -254,6 +254,9 @@ class CircuitSimulator:
 
         self.circuit_synth_circuit = circuit_synth_circuit
         self.spice_circuit = None
+        # {ref: ResolvedModel} recording which model tier each active device got
+        # (datasheet_fit / generic / vendor_lib). Populated during conversion.
+        self.model_provenance = {}
         self._convert_to_spice()
 
     def _convert_to_spice(self):
@@ -262,6 +265,7 @@ class CircuitSimulator:
 
         converter = SpiceConverter(self.circuit_synth_circuit)
         self.spice_circuit = converter.convert()
+        self.model_provenance = converter.model_provenance
 
     def _make_simulator(self, temperature: float, options: Optional[Dict] = None):
         """Build a PySpice simulator with temperature and optional ngspice options.

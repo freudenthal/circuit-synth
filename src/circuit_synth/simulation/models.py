@@ -343,12 +343,6 @@ class ModelLibrary:
         params = " ".join([f"{k}={v}" for k, v in model.parameters.items()])
         return f".MODEL {model.name} {model.model_type} ({params})"
 
-    def apply_to_circuit(self, spice_circuit):
-        """Apply all required models to a PySpice circuit."""
-        # This would be called by the converter to add model definitions
-        # to the SPICE netlist
-        pass
-
 
 # Global model library instance
 MODEL_LIBRARY = ModelLibrary()
