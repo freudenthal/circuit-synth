@@ -85,6 +85,20 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   list of `(t, v)` pairs). Keep SI suffixes (`1k`/`1m`/`1u`/`1n`) — ngspice parses
   them. Run with `sim.transient_analysis(step_s, end_s)`; an optional `options={...}`
   (e.g. `reltol`/`abstol`/`gmin`) tunes ngspice convergence on any analysis.
+- **Active-device models (diodes/BJTs/MOSFETs):** naming a real part in `value`
+  (e.g. `value="1N4148"`, `value="2N3904"`) pulls **datasheet-fit** parameters from
+  the built-in model library when known; otherwise a device falls back to a
+  textbook-generic model. The converter records which tier each device got in
+  `sim.model_provenance[ref].tier` (`datasheet_fit` / `generic` / `vendor_lib`) and
+  logs it, so a generic is never silently passed off as the real part. Naming a
+  part the library can't resolve is a hard error (declare the model, don't guess).
+- **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
+  `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
+  use it for connectors/test points so `validate()` doesn't flag them);
+  `Sim.Params="bf=250 vaf=80"` overrides model params; `Sim.Library="path.lib"` +
+  `Sim.Name="MODEL"` (+ optional `Sim.Pins="1=out 2=inp 3=inn"`) attaches an external
+  vendor `.lib`/`.subckt` model verbatim. Pass dotted names as
+  `Component(..., **{"Sim.Enable": "0"})`.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install is needed.
 - If simulation errors out or the backend is unavailable (the helper prints
