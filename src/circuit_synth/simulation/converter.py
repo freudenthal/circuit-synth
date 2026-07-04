@@ -184,7 +184,7 @@ class SpiceConverter:
         simulatable). Source checks come before the op-amp heuristic so a source
         symbol is never misclassified. Explicit SPICE sources use KiCad's real
         Simulation_SPICE library (VDC/VSIN/IDC/...); "Device:V"/"Device:I" are
-        exact aliases (not real KiCad symbols but referenced by docs/testbench) --
+        exact aliases (not real KiCad symbols but sometimes referenced by docs) --
         matched exactly so they do not also swallow "Device:Varistor".
         """
         if not symbol:
@@ -868,52 +868,82 @@ class SpiceConverter:
             f"out={out}, in+={in_plus}, in-={in_minus}"
         )
 
+    def _named_terminal_nodes(self, component) -> dict:
+        """``{uppercased pin name: spice node}`` for a component's connected pins.
+
+        Transistor terminals must be mapped by pin *name* (C/B/E, D/G/S), not pin
+        number: KiCad symbols number them inconsistently (2N7000 is pin1=S,2=G,3=D;
+        BC547 is 1=C,2=B,3=E), so a positional mapping silently swaps
+        drain/source (or collector/emitter) for many real parts.
+        """
+        out = {}
+        pin_map = getattr(component, "_pins", None)
+        if isinstance(pin_map, dict):
+            for pin in pin_map.values():
+                net = getattr(pin, "net", None)
+                name = (getattr(pin, "name", "") or "").strip().upper()
+                if net is not None and name:
+                    out[name] = self.node_map.get(net.name, net.name)
+        return out
+
     def _add_bjt_transistor(self, component, ref: str, value: str):
-        """Add BJT transistor to SPICE circuit."""
-        nodes = self._get_component_nodes(component)
-        if len(nodes) < 3:
-            logger.warning(f"BJT {ref} needs 3 connections (C,B,E), got {len(nodes)}")
-            return
+        """Add BJT transistor to SPICE circuit.
+
+        Terminals are resolved by pin name (C/B/E); falls back to pin-number order
+        only when the symbol doesn't name all three (rare).
+        """
+        named = self._named_terminal_nodes(component)
+        if all(k in named for k in ("C", "B", "E")):
+            c_node, b_node, e_node = named["C"], named["B"], named["E"]
+        else:
+            nodes = self._get_component_nodes(component)
+            if len(nodes) < 3:
+                logger.warning(
+                    f"BJT {ref} needs 3 connections (C,B,E), got {len(nodes)}"
+                )
+                return
+            c_node, b_node, e_node = nodes[0], nodes[1], nodes[2]
 
         # Determine model (NPN/PNP) from value keyword or symbol polarity, applying
         # any Sim.Params override.
         model_name = self._resolve_device_model(component, ref) or "DefaultNPN"
 
-        # Add transistor (collector, base, emitter)
-        self.spice_circuit.Q(ref, nodes[0], nodes[1], nodes[2], model=model_name)
+        self.spice_circuit.Q(ref, c_node, b_node, e_node, model=model_name)
         logger.debug(
-            f"Added BJT {ref}: C={nodes[0]}, B={nodes[1]}, E={nodes[2]}, model={model_name}"
+            f"Added BJT {ref}: C={c_node}, B={b_node}, E={e_node}, model={model_name}"
         )
 
     def _add_mosfet(self, component, ref: str, value: str):
-        """Add MOSFET to SPICE circuit."""
-        nodes = self._get_component_nodes(component)
-        if len(nodes) < 3:
-            logger.warning(
-                f"MOSFET {ref} needs at least 3 connections (D,G,S), got {len(nodes)}"
-            )
-            return
+        """Add MOSFET to SPICE circuit.
+
+        Terminals are resolved by pin name (D/G/S, plus an optional bulk pin B);
+        falls back to pin-number order only when the symbol doesn't name D/G/S.
+        Bulk defaults to the source when the symbol has no separate bulk pin
+        (3-terminal parts like 2N7000/BSS84).
+        """
+        named = self._named_terminal_nodes(component)
+        if all(k in named for k in ("D", "G", "S")):
+            d_node, g_node, s_node = named["D"], named["G"], named["S"]
+            b_node = named.get("B", s_node)
+        else:
+            nodes = self._get_component_nodes(component)
+            if len(nodes) < 3:
+                logger.warning(
+                    f"MOSFET {ref} needs at least 3 connections (D,G,S), got {len(nodes)}"
+                )
+                return
+            d_node, g_node, s_node = nodes[0], nodes[1], nodes[2]
+            b_node = nodes[3] if len(nodes) >= 4 else nodes[2]
 
         # Determine model (NMOS/PMOS) from value keyword or symbol polarity, applying
         # any Sim.Params override.
         model_name = self._resolve_device_model(component, ref) or "DefaultNMOS"
 
-        # Add MOSFET (drain, gate, source, bulk - bulk defaults to source if not provided)
-        if len(nodes) >= 4:
-            self.spice_circuit.M(
-                ref, nodes[0], nodes[1], nodes[2], nodes[3], model=model_name
-            )
-            logger.debug(
-                f"Added MOSFET {ref}: D={nodes[0]}, G={nodes[1]}, S={nodes[2]}, B={nodes[3]}"
-            )
-        else:
-            # Bulk connected to source
-            self.spice_circuit.M(
-                ref, nodes[0], nodes[1], nodes[2], nodes[2], model=model_name
-            )
-            logger.debug(
-                f"Added MOSFET {ref}: D={nodes[0]}, G={nodes[1]}, S={nodes[2]} (bulk=source)"
-            )
+        self.spice_circuit.M(ref, d_node, g_node, s_node, b_node, model=model_name)
+        logger.debug(
+            f"Added MOSFET {ref}: D={d_node}, G={g_node}, S={s_node}, B={b_node}, "
+            f"model={model_name}"
+        )
 
     def _add_voltage_source(self, component, ref: str, value: str):
         """Add voltage source to SPICE circuit.

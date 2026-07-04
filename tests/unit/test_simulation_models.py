@@ -162,6 +162,64 @@ def test_nmos_emits_nmos_model():
     assert ".model DefaultNMOS NMOS" in netlist, netlist
 
 
+def test_mosfet_terminals_mapped_by_name_not_number():
+    """D/G/S are mapped by pin NAME, so a 2N7000 (pins S,G,D) isn't swapped.
+
+    2N7000's pins are numbered 1=S, 2=G, 3=D. A positional mapping would emit the
+    M element with drain and source swapped; name-based mapping keeps D first, S
+    third. (strict=False: this fragment isn't a full simulatable circuit.)
+    """
+
+    @circuit(name="NmosPinMap")
+    def cir():
+        m = Component(symbol="Transistor_FET:2N7000", ref="M1")
+        d = Net("DRAIN")
+        g = Net("GATE")
+        s = Net("SOURCE")
+        m[3] += d  # pin 3 = D
+        m[2] += g  # pin 2 = G
+        m[1] += s  # pin 1 = S
+
+    netlist = str(SpiceConverter(cir()).convert(strict=False))
+    # M<ref> D G S B model -> drain first, source third (would be reversed if
+    # the converter mapped by pin number).
+    assert "MM1 DRAIN GATE SOURCE" in netlist, netlist
+    assert "MM1 SOURCE GATE DRAIN" not in netlist, netlist
+
+
+def test_cmos_inverter_terminals_mapped_by_name():
+    """A CMOS inverter maps both complementary FETs' terminals correctly.
+
+    BSS84 (PMOS, pins G,S,D) and 2N7000 (NMOS, pins S,G,D) both differ from D/G/S
+    order; the emitted M elements must have D=OUT, G=IN and the right source rail.
+    """
+
+    @circuit(name="CmosMap")
+    def cir():
+        vdd = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
+        vg = Component(symbol="Simulation_SPICE:VDC", ref="V2", value="0V")
+        mp = Component(symbol="Transistor_FET:BSS84", ref="QP", value="pmos")
+        mn = Component(symbol="Transistor_FET:2N7000", ref="QN", value="nmos")
+        VDD = Net("VDD")
+        IN = Net("IN")
+        OUT = Net("OUT")
+        GND = Net("GND")
+        vdd[1] += VDD
+        vdd[2] += GND
+        vg[1] += IN
+        vg[2] += GND
+        mp[1] += IN  # BSS84 pin 1 = G
+        mp[2] += VDD  # pin 2 = S
+        mp[3] += OUT  # pin 3 = D
+        mn[1] += GND  # 2N7000 pin 1 = S
+        mn[2] += IN  # pin 2 = G
+        mn[3] += OUT  # pin 3 = D
+
+    netlist = _netlist(cir())
+    assert "MQP1 OUT IN VDD" in netlist, netlist  # PMOS: D=OUT, G=IN, S=VDD
+    assert "MQN1 OUT IN 0" in netlist, netlist  # NMOS: D=OUT, G=IN, S=GND(0)
+
+
 def test_unresolved_model_raises():
     """A device naming a model the ladder can't resolve fails strict validation.
 

@@ -31,7 +31,6 @@ from .manufacturer_models import ManufacturerModels, get_manufacturer_models
 from .model_store import SpiceModelStore, get_model_store, resolve_mpn
 from .models import ModelLibrary, SpiceModel, get_model_library
 from .simulator import CircuitSimulator, SimulationResult
-from .testbench import TestBenchGenerator, generate_testbench_for_circuit
 from .visualization import SimulationVisualizer, enhance_simulation_result
 
 # Enhance SimulationResult with export capabilities
@@ -54,7 +53,5 @@ __all__ = [
     "SpiceModelStore",
     "get_model_store",
     "resolve_mpn",
-    "TestBenchGenerator",
-    "generate_testbench_for_circuit",
     "SimulationVisualizer",
 ]

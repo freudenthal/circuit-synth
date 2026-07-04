@@ -1,14 +1,20 @@
-"""Acceptance: real-part simulation with datasheet-fit models (Stage 9.5).
+"""Acceptance: active-device simulation end-to-end (Stages 9.5 + transistor).
 
-End-to-end proof that naming a real MPN pulls datasheet-fit parameters through the
-resolution ladder and produces physically sensible results on ngspice -- and that
-a ``Sim.Enable=0`` decorative part changes nothing.
+End-to-end proof that the semiconductor ``.model`` path produces physically
+sensible results on ngspice, across diode / BJT / MOSFET.
 
 * 1N4148 half-wave rectifier -> forward drop lands in the datasheet 0.6-0.8 V band
-  (a textbook-generic diode would give a visibly different drop), reverse blocks.
+  (a textbook-generic diode would give a visibly different drop), reverse blocks;
+  D1 resolves tier ``datasheet_fit``.
 * 2N3904 common-emitter amp -> a sane operating point (IC and an active-region
-  collector) and a small-signal gain matching the emitter-degenerated design.
-* Both assert the device resolved to tier ``datasheet_fit``.
+  collector) and a small-signal gain matching the emitter-degenerated design;
+  Q1 resolves tier ``datasheet_fit``.
+* CMOS inverter (BSS84 + 2N7000, generic FET models) -> a clean DC transfer curve
+  (rails at 0/VDD, switching threshold ~VDD/2). Also guards the FET terminal
+  mapping: KiCad FET symbols number pins inconsistently (2N7000 is S,G,D), so the
+  converter maps D/G/S by pin *name* -- a positional mapping would swap
+  drain/source and wreck the inverter.
+* A ``Sim.Enable=0`` decorative part changes nothing.
 
 Skips cleanly when PySpice or a loadable ngspice is unavailable.
 """
@@ -182,3 +188,59 @@ def test_ce_amp_small_signal_gain():
     idx = int(np.argmin(np.abs(freq - 1e4)))
     gain = abs(np.array(res.analysis["C"])[idx]) / abs(np.array(res.analysis["IN"])[idx])
     assert 3.5 <= gain <= 5.5, f"midband gain {gain:.2f} outside expected range"
+
+
+# --------------------------------------------------------------------------- #
+# CMOS inverter (MOSFET .model path + name-based terminal mapping)             #
+# --------------------------------------------------------------------------- #
+
+
+@circuit(name="CmosInverter")
+def _cmos_inverter():
+    """VDD=5V; PMOS pull-up (BSS84) + NMOS pull-down (2N7000); V2 sweeps the input."""
+    vdd = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
+    vin = Component(symbol="Simulation_SPICE:VDC", ref="V2", value="0V")
+    mp = Component(symbol="Transistor_FET:BSS84", ref="QP", value="pmos")
+    mn = Component(symbol="Transistor_FET:2N7000", ref="QN", value="nmos")
+
+    vdd_n = Net("VDD")
+    inn = Net("IN")
+    out = Net("OUT")
+    gnd = Net("GND")
+
+    vdd[1] += vdd_n
+    vdd[2] += gnd
+    vin[1] += inn
+    vin[2] += gnd
+    # BSS84 (PMOS) pins 1=G, 2=S, 3=D -> source at VDD, drain at OUT, gate at IN.
+    mp[1] += inn
+    mp[2] += vdd_n
+    mp[3] += out
+    # 2N7000 (NMOS) pins 1=S, 2=G, 3=D -> source at GND, drain at OUT, gate at IN.
+    mn[1] += gnd
+    mn[2] += inn
+    mn[3] += out
+
+
+def test_cmos_inverter_transfer_curve():
+    """DC sweep of the input yields a textbook inverter transfer curve.
+
+    Output rails to VDD when the input is low and to ~0 when high, and the
+    switching point (Vout = VDD/2) sits near VDD/2 for the symmetric generic FETs.
+    """
+    sim = _cmos_inverter().simulate()
+    # The input DC source (ref V2) is element "VV2" in the netlist.
+    res = sim.dc_analysis("VV2", 0.0, 5.0, 0.1)
+    vin = np.array(res.analysis["IN"])
+    vout = np.array(res.analysis["OUT"])
+
+    def _vout_at(target):
+        return float(vout[int(np.argmin(np.abs(vin - target)))])
+
+    assert _vout_at(0.0) == pytest.approx(5.0, abs=0.1)  # input low -> output high
+    assert _vout_at(5.0) == pytest.approx(0.0, abs=0.1)  # input high -> output low
+    # Switching threshold (crossover at VDD/2) near the mid-rail for symmetric FETs.
+    v_switch = float(vin[int(np.argmin(np.abs(vout - 2.5)))])
+    assert 2.0 <= v_switch <= 3.0, f"switching threshold {v_switch:.2f} V off-center"
+    # Monotonic, inverting: high input never produces a higher output than low input.
+    assert _vout_at(1.0) > _vout_at(4.0)
