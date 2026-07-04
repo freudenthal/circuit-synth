@@ -101,6 +101,16 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `Component(..., **{"Sim.Enable": "0"})`.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install is needed.
+- **Save a plot of the result** so the log is visual, not just numbers. Every
+  `SimulationResult` has headless PNG savers (no display needed):
+  `result.save_bode_plot("sim_plots/iterN_<name>_bode.png", "NET")` for AC,
+  `result.save_transient_plot("sim_plots/iterN_<name>_tran.png", ["NET", ...])`
+  for transient, `result.save_dc_transfer_plot("sim_plots/iterN_<name>_dc.png",
+  "NET", sweep_label="Vin")` for a DC sweep. Write them under a `sim_plots/`
+  directory in the project root (created automatically); use the iteration
+  number and circuit name in the filename so they don't collide. They return
+  the written path, or `None` if plotting is unavailable — if `None`, skip the
+  embed step, don't fail the loop.
 - If simulation errors out or the backend is unavailable (the helper prints
   `SIMULATION_UNAVAILABLE` and exits 2): fall back to STATIC verification —
   recompute expected values by hand (Ohm's law, divider ratios), confirm net
@@ -109,6 +119,12 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 
 ## Phase 6 — EXAMINE & DECIDE
 - Compare each measurement to its criterion → PASS/FAIL table in `design_log.md`.
+- **Embed the plot(s)** you saved in Phase 5: after the PASS/FAIL table, add one
+  markdown image per plot — `![iter N bode](sim_plots/iterN_<name>_bode.png)` —
+  followed by a one-line reading of what it shows (e.g. "−3 dB at ~9.7 kHz,
+  −20 dB/dec rolloff — matches the 1st-order target"). If a plot save returned
+  `None` (plotting unavailable), skip the embed and note "plot unavailable"; if
+  simulation didn't run at all, there is no plot — say so, never invent one.
 - All PASS → **COMPLETE**: summarize (files written, final values, how verified,
   path to the `.kicad_pro` to open in KiCad). Stop.
 - Any FAIL → diagnose before looping:

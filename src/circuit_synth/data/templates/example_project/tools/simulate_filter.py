@@ -91,6 +91,13 @@ def main() -> int:
     print(f"cutoff_hz={fc:.1f}" if fc is not None else "cutoff_hz=None")
     print(f"rolloff_db_per_decade={rolloff:.2f}")
 
+    # Save a headless Bode PNG next to the log (returns None if matplotlib is
+    # missing -- harmless). This is the pattern the design-circuit loop uses to
+    # embed plots in design_log.md.
+    plot_path = result.save_bode_plot("sim_plots/lowpass_filter_bode.png", "VOUT")
+    if plot_path is not None:
+        print(f"bode_plot={plot_path}")
+
     if fc is None or abs(fc - FC_HZ) / FC_HZ > 0.05:
         print(f"FAIL: cutoff {fc} Hz not within 5% of {FC_HZ} Hz")
         return 1
