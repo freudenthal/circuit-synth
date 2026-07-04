@@ -43,18 +43,14 @@ try:
 
         _roots = [
             _Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "KiCad",
-            _Path(
-                os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
-            )
+            _Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
             / "KiCad",
         ]
         _versioned = []
         for _root in _roots:
             if _root.is_dir():
                 for _child in _root.iterdir():
-                    if _child.is_dir() and _re.fullmatch(
-                        r"\d+(?:\.\d+)*", _child.name
-                    ):
+                    if _child.is_dir() and _re.fullmatch(r"\d+(?:\.\d+)*", _child.name):
                         _versioned.append(
                             (tuple(int(p) for p in _child.name.split(".")), _child)
                         )
@@ -131,6 +127,77 @@ class SimulationResult:
         except:
             raise KeyError(f"Current for component '{component}' not found")
 
+    def _frequency_array(self):
+        """The AC sweep frequency axis as a real float ndarray.
+
+        Raises if this result is not from an AC analysis (no frequency axis).
+        """
+        import numpy as np
+
+        freq = getattr(self.analysis, "frequency", None)
+        if freq is None:
+            raise ValueError(
+                "no frequency axis available (bode/cutoff need an AC analysis result)"
+            )
+        return np.real(np.asarray(freq)).astype(float)
+
+    def _complex_node(self, node: str):
+        """The complex node response (H(f)) as a complex ndarray."""
+        import numpy as np
+
+        try:
+            data = self.analysis[node]
+        except Exception:
+            raise KeyError(f"Node '{node}' not found in AC analysis results")
+        return np.asarray(data, dtype=complex)
+
+    def bode(self, node: str, input_magnitude: float = 1.0):
+        """Bode data for a node: ``(frequencies, magnitude_db, phase_deg)``.
+
+        ``magnitude_db = 20*log10(|H|)`` where ``H = V(node) / input_magnitude``.
+        With the default AC source magnitude of 1 V the node voltage *is* the
+        transfer function, so ``input_magnitude`` can be left at 1.
+        """
+        import numpy as np
+
+        freq = self._frequency_array()
+        H = self._complex_node(node) / input_magnitude
+        magnitude_db = 20 * np.log10(np.abs(H))
+        phase_deg = np.angle(H, deg=True)
+        return freq, magnitude_db, phase_deg
+
+    def passband_gain_db(self, node: str, input_magnitude: float = 1.0) -> float:
+        """Peak magnitude (dB) of the response -- the passband gain."""
+        import numpy as np
+
+        _, magnitude_db, _ = self.bode(node, input_magnitude)
+        return float(np.max(magnitude_db))
+
+    def cutoff_frequency(
+        self, node: str, ref_db: float = -3.0, input_magnitude: float = 1.0
+    ) -> Optional[float]:
+        """Frequency where the response is ``ref_db`` below its passband peak.
+
+        For a low-pass response this is the -3 dB corner. Returns the first
+        frequency (scanning low->high) where the magnitude crosses
+        ``passband_db + ref_db``, linearly interpolated in log-frequency between
+        the two straddling samples. Returns ``None`` if the curve never crosses.
+        """
+        import numpy as np
+
+        freq, magnitude_db, _ = self.bode(node, input_magnitude)
+        target = float(np.max(magnitude_db)) + ref_db
+        for i in range(1, len(freq)):
+            a, b = magnitude_db[i - 1], magnitude_db[i]
+            if a == b:
+                continue
+            # Straddle: target lies between consecutive samples.
+            if (a - target) * (b - target) <= 0:
+                fa, fb = np.log10(freq[i - 1]), np.log10(freq[i])
+                t = (target - a) / (b - a)
+                return float(10 ** (fa + t * (fb - fa)))
+        return None
+
     def list_nodes(self) -> List[str]:
         """List all available voltage nodes."""
         nodes = []
@@ -196,36 +263,51 @@ class CircuitSimulator:
         converter = SpiceConverter(self.circuit_synth_circuit)
         self.spice_circuit = converter.convert()
 
-    def operating_point(self) -> SimulationResult:
+    def operating_point(self, temperature: float = 25) -> SimulationResult:
         """Run DC operating point analysis."""
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
 
-        simulator = self.spice_circuit.simulator(temperature=25, nominal_temperature=25)
+        simulator = self.spice_circuit.simulator(
+            temperature=temperature, nominal_temperature=temperature
+        )
         analysis = simulator.operating_point()
 
         return SimulationResult(analysis, "dc_op")
 
     def dc_analysis(
-        self, source: str, start: float, stop: float, step: float
+        self,
+        source: str,
+        start: float,
+        stop: float,
+        step: float,
+        temperature: float = 25,
     ) -> SimulationResult:
         """Run DC sweep analysis."""
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
 
-        simulator = self.spice_circuit.simulator(temperature=25, nominal_temperature=25)
+        simulator = self.spice_circuit.simulator(
+            temperature=temperature, nominal_temperature=temperature
+        )
         analysis = simulator.dc(**{source: slice(start, stop, step)})
 
         return SimulationResult(analysis, "dc_sweep")
 
     def ac_analysis(
-        self, start_freq: float, stop_freq: float, points: int = 100
+        self,
+        start_freq: float,
+        stop_freq: float,
+        points: int = 100,
+        temperature: float = 25,
     ) -> SimulationResult:
         """Run AC analysis."""
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
 
-        simulator = self.spice_circuit.simulator(temperature=25, nominal_temperature=25)
+        simulator = self.spice_circuit.simulator(
+            temperature=temperature, nominal_temperature=temperature
+        )
         analysis = simulator.ac(
             start_frequency=start_freq @ u_Hz,
             stop_frequency=stop_freq @ u_Hz,
@@ -235,12 +317,16 @@ class CircuitSimulator:
 
         return SimulationResult(analysis, "ac")
 
-    def transient_analysis(self, step_time: float, end_time: float) -> SimulationResult:
+    def transient_analysis(
+        self, step_time: float, end_time: float, temperature: float = 25
+    ) -> SimulationResult:
         """Run transient analysis."""
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
 
-        simulator = self.spice_circuit.simulator(temperature=25, nominal_temperature=25)
+        simulator = self.spice_circuit.simulator(
+            temperature=temperature, nominal_temperature=temperature
+        )
         analysis = simulator.transient(
             step_time=step_time @ u_s, end_time=end_time @ u_s
         )

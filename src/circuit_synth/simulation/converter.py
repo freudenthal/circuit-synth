@@ -343,7 +343,13 @@ class SpiceConverter:
             )
 
     def _add_voltage_source(self, component, ref: str, value: str):
-        """Add voltage source to SPICE circuit."""
+        """Add voltage source to SPICE circuit.
+
+        A ``Simulation_SPICE:VAC``/``VSIN`` source is given an AC magnitude so
+        the node it drives becomes the transfer function during ``ac_analysis``
+        (default 1 V, so |V(out)| == |H(f)|). ``VDC`` keeps its DC-only value.
+        The AC magnitude / DC offset are parsed from ``value`` when present.
+        """
         nodes = self._get_component_nodes(component)
         if len(nodes) < 2:
             logger.warning(
@@ -351,20 +357,31 @@ class SpiceConverter:
             )
             return
 
-        # Parse voltage value
-        voltage = self._convert_value_to_spice(value or "5V", "V")
-
         # Add to list of voltage sources for tracking
         self.voltage_sources.append(ref)
         # Mark this source's nets so the net-name heuristic won't double-drive them.
         self.driven_nets.update(self._component_net_names(component))
 
-        # Add voltage source. nodes[] is in pin-number order, so nodes[0] is pin 1
-        # (KiCad Sim.Pins "1=+") and nodes[1] is pin 2 ("2=-"): V(name, +, -, value).
-        self.spice_circuit.V(ref, nodes[0], nodes[1], voltage)
-        logger.debug(
-            f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {voltage}V"
-        )
+        symbol = getattr(component, "symbol", "") or ""
+        is_ac = "VAC" in symbol.upper() or "VSIN" in symbol.upper()
+
+        # nodes[] is in pin-number order, so nodes[0] is pin 1 (KiCad Sim.Pins
+        # "1=+") and nodes[1] is pin 2 ("2=-"): V(name, +, -, spec).
+        if is_ac:
+            # AC source: the value (if given) is the AC magnitude; DC offset 0 so
+            # only the small-signal response appears. Emit "DC 0 AC <mag>".
+            ac_mag = self._convert_value_to_spice(value, "V") if value else 1.0
+            self.spice_circuit.V(ref, nodes[0], nodes[1], f"DC 0 AC {ac_mag}")
+            logger.debug(
+                f"Added AC voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) "
+                f"= DC 0 AC {ac_mag}"
+            )
+        else:
+            voltage = self._convert_value_to_spice(value or "5V", "V")
+            self.spice_circuit.V(ref, nodes[0], nodes[1], voltage)
+            logger.debug(
+                f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {voltage}V"
+            )
 
     def _add_current_source(self, component, ref: str, value: str):
         """Add current source to SPICE circuit."""

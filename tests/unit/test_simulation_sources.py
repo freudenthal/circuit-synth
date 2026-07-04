@@ -123,6 +123,66 @@ def test_polarity_swaps_with_pin_assignment():
     assert parts[1] == "0" and parts[2] == "VIN", parts
 
 
+def _vsin_available() -> bool:
+    """True only if the KiCad ``Simulation_SPICE:VSIN`` symbol constructs.
+
+    ``VSIN`` (not ``VAC`` -- which does not exist in KiCad 10) is the AC/transient
+    stimulus symbol; the converter gives it an ``AC`` magnitude so its driven node
+    is the transfer function during an AC sweep.
+    """
+    try:
+        from circuit_synth.simulation.converter import PYSPICE_AVAILABLE
+
+        if not PYSPICE_AVAILABLE:
+            return False
+        Component(symbol="Simulation_SPICE:VSIN", ref="V1", value="1")
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(
+    not _vsin_available(), reason="KiCad Simulation_SPICE:VSIN symbol not available"
+)
+def test_ac_source_emits_ac_magnitude():
+    """A VSIN source emits an ``AC <mag>`` term (default 1) in its netlist line."""
+
+    @circuit(name="ACSource")
+    def ac_src():
+        v1 = Component(symbol="Simulation_SPICE:VSIN", ref="V1")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        vin = Net("VIN")
+        gnd = Net("GND")
+        v1[1] += vin
+        v1[2] += gnd
+        r1[1] += vin
+        r1[2] += gnd
+
+    line = _v1_line(_netlist(ac_src()))
+    assert "AC 1" in line.upper(), line
+
+
+@pytest.mark.skipif(
+    not _vsin_available(), reason="KiCad Simulation_SPICE:VSIN symbol not available"
+)
+def test_ac_source_honors_explicit_magnitude():
+    """An explicit ``value`` on a VSIN source becomes its AC magnitude."""
+
+    @circuit(name="ACSourceMag")
+    def ac_src():
+        v1 = Component(symbol="Simulation_SPICE:VSIN", ref="V1", value="2V")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        vin = Net("VIN")
+        gnd = Net("GND")
+        v1[1] += vin
+        v1[2] += gnd
+        r1[1] += vin
+        r1[2] += gnd
+
+    line = _v1_line(_netlist(ac_src())).upper()
+    assert "AC 2" in line, line
+
+
 def _ngspice_loads() -> bool:
     try:
         from circuit_synth.simulation.simulator import PYSPICE_AVAILABLE
