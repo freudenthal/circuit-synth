@@ -240,11 +240,18 @@ class CircuitReconstructor:
                             f"Skipping connection - missing comp_ref ({comp_ref}) or pin_number ({pin_number})"
                         )
 
-            # Log any connection issues for debugging
+            # Single-connection nets: these are almost always fine (an I/O net
+            # terminated by a hierarchical/global label at the sheet boundary, or a
+            # power net terminated by a power symbol). KiCad's own headless ERC
+            # classifies them as an `isolated_pin_label` *warning*, not an error
+            # (verified Stage 14 — ToDo Outstanding §2), so this is debug-level, not
+            # a warning that scares users on every generation. Run the ERC gate
+            # (generate_kicad_project(erc_gate=True)) for ground-truth connectivity.
             for net_name, net_obj in temp_circuit._nets.items():
                 if len(net_obj._pins) < 2:
-                    self.logger.warning(
-                        f"Net '{net_name}' has only {len(net_obj._pins)} connection(s) - may indicate connection issue"
+                    self.logger.debug(
+                        f"Net '{net_name}' has only {len(net_obj._pins)} connection(s) "
+                        f"(expected for label/power-terminated I/O nets; ERC confirms)"
                     )
                 # elif len(net_obj._pins) > 10:
                 #     self.logger.info(f"Net '{net_name}' has {len(net_obj._pins)} connections (large net)")

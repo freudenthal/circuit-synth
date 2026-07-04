@@ -615,6 +615,7 @@ class Circuit:
         generate_ratsnest: bool = True,
         update_source_refs: Optional[bool] = None,
         preserve_user_components: bool = False,
+        erc_gate: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a complete KiCad project (schematic + PCB) from this circuit.
@@ -637,6 +638,11 @@ class Circuit:
             preserve_user_components: Keep components in KiCad that don't exist in Python (default: False)
                                      False: Python is source of truth - delete components not in Python
                                      True: Preserve all components in KiCad, even if not in Python
+            erc_gate: Run KiCad headless ERC on the generated root schematic and
+                     auto-fix `power_pin_not_driven` (add PWR_FLAG), iterating up to
+                     3 times (default: False). Residual violations are returned in
+                     `result["erc_report"]`. If kicad-cli is unavailable this is a
+                     warning, not a failure.
 
         Returns:
             dict: Result dictionary containing:
@@ -775,12 +781,42 @@ class Circuit:
                     project_name=project_name,
                     output_path=str(output_path),
                 )
-                # Return success result with JSON path
-                return {
+
+                success_result: Dict[str, Any] = {
                     "success": True,
                     "json_path": json_path,
                     "project_path": output_path,
                 }
+
+                root_sch = output_path / f"{project_base_name}.kicad_sch"
+
+                # Post-generation ERC gate (opt-in).
+                if erc_gate and root_sch.exists():
+                    try:
+                        from ..kicad.sch_gen.erc_gate import ErcUnavailable
+                        from ..kicad.sch_gen.erc_gate import erc_gate as run_erc_gate
+
+                        report = run_erc_gate(str(root_sch))
+                        success_result["erc_report"] = report
+                        context_logger.info(
+                            "ERC gate: %d error(s), %d warning(s), %d autofix(es)",
+                            report.error_count,
+                            report.warning_count,
+                            report.autofixes_applied,
+                            component="CIRCUIT",
+                        )
+                    except ErcUnavailable as e:
+                        context_logger.warning(
+                            f"ERC gate skipped (kicad-cli unavailable): {e}",
+                            component="CIRCUIT",
+                        )
+                    except Exception as e:  # ERC must never break generation
+                        context_logger.warning(
+                            f"ERC gate skipped ({type(e).__name__}): {e}",
+                            component="CIRCUIT",
+                        )
+
+                return success_result
             else:
                 error_msg = result.get(
                     "error", "Unknown error occurred during project generation"

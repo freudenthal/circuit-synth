@@ -121,6 +121,22 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 | `UnicodeEncodeError` | You forgot `PYTHONUTF8=1`; rerun |
 | Gerber/PCB errors | Ignore — unavailable feature; ensure `generate_pcb=False` |
 
+## Phase 4.5 — ERC (optional connectivity gate)
+- Run KiCad's headless Electrical Rules Check to catch real wiring mistakes
+  (undriven power, dangling pins) before trusting the schematic:
+  `PYTHONUTF8=1 "C:\Program Files\KiCad\10.0\bin\kicad-cli.exe" sch erc
+  --format json --severity-all --output erc.json <project>/<name>.kicad_sch`
+  (netlist/ERC on the **root** sheet covers subsheets too).
+- To auto-repair the common `power_pin_not_driven` case (a power symbol with no
+  driver → add a `PWR_FLAG`), enable the generator's ERC gate: pass
+  `erc_gate=True` to the generation call in your Phase-3 file. It iterates ERC +
+  PWR_FLAG fixes and returns the residual report on the result
+  (`result["erc_report"].summary()`).
+- Paste the ERC summary into `design_log.md`. Treat remaining **errors** as
+  FAIL → route back to Phase 3 (fix the connection). **Warnings** like
+  `isolated_pin_label` on an I/O net terminated by a single label are normal —
+  note them, don't chase them. If kicad-cli is absent, skip this phase.
+
 ## Phase 5 — SIMULATE
 <!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/loop-boundary-contract.md rule R3. -->
 - **DC / operating point:** follow the working pattern in
