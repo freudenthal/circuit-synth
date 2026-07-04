@@ -9,9 +9,13 @@ Prints an aligned table of *real* availability rows and a ``skipped:`` line for
 any source that could not be queried (missing credentials, network error). It
 never fabricates stock or prices and never uses the JLCPCB demo scraper.
 
-Credentials (optional -- without them the relevant source is simply skipped):
-  DigiKey: DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET (or cs-setup-digikey-api)
-  JLCPCB:  JLCPCB_KEY / JLCPCB_SECRET
+Credentials:
+  DigiKey: DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET (or cs-setup-digikey-api).
+           Without these DigiKey is skipped.
+  JLCPCB:  JLCPCB_KEY / JLCPCB_SECRET use the official API; WITHOUT them JLC
+           still works keylessly via the community tscircuit JLCSearch mirror
+           (rows tagged "jlcpcb:jlcsearch", built from JLCPCB's daily data --
+           may lag the official API by up to ~a day).
 
 Always exits 0 -- this is an informational tool; "everything skipped" is a
 valid, honest outcome, not a failure.
@@ -45,14 +49,14 @@ def main() -> int:
     )
 
     if report.results:
-        header = f"{'SOURCE':<9} {'MPN':<24} {'STOCK':>10} {'PRICE':>10}  DATASHEET"
+        header = f"{'SOURCE':<17} {'MPN':<22} {'LCSC':<10} {'STOCK':>10} {'PRICE':>10}"
         print(header)
         print("-" * len(header))
         for r in report.results:
             price = f"{r.unit_price:.4f}" if r.unit_price is not None else "n/a"
             print(
-                f"{r.source:<9} {r.mpn:<24} {r.stock:>10} {price:>10}  "
-                f"{r.datasheet_url or ''}"
+                f"{r.source:<17} {r.mpn:<22} {r.lcsc or '':<10} "
+                f"{r.stock:>10} {price:>10}"
             )
     else:
         print(f"No real availability found for '{args.query}'.")

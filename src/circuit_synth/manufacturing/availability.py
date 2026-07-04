@@ -27,13 +27,14 @@ class PartAvailability:
     """A single real availability row from one supplier."""
 
     query: str
-    source: str  # "digikey" | "jlcpcb"
+    source: str  # "digikey" | "jlcpcb" (official API) | "jlcpcb:jlcsearch" (keyless mirror)
     mpn: str
     stock: int
     unit_price: Optional[float]
     currency: str = "USD"
     from_cache: bool = False
     datasheet_url: Optional[str] = None
+    lcsc: Optional[str] = None  # C-prefixed LCSC part number (JLC sources)
 
 
 @dataclass
@@ -110,25 +111,31 @@ def _check_digikey(query: str, min_stock: int, max_results: int, report):
 
 
 def _check_jlcpcb(query: str, min_stock: int, max_results: int, report):
-    """Query the credentialed JLC API (never the demo scraper)."""
+    """JLCPCB availability: official credentialed API if keyed, else keyless mirror.
+
+    Never uses the demo web scraper. With ``JLCPCB_KEY``/``JLCPCB_SECRET`` set the
+    official API is authoritative; otherwise the keyless tscircuit JLCSearch
+    mirror provides real (daily) data so JLC is not skipped for want of keys.
+    """
+    if os.environ.get("JLCPCB_KEY") and os.environ.get("JLCPCB_SECRET"):
+        _jlcpcb_official(query, min_stock, max_results, report)
+    else:
+        _jlcpcb_keyless(query, min_stock, max_results, report)
+
+
+def _jlcpcb_official(query: str, min_stock: int, max_results: int, report):
+    """Credentialed JLC parts API path (source ``jlcpcb``)."""
     try:
         from .jlcpcb.jlc_parts_lookup import JlcPartsInterface
     except Exception as e:
         report.skipped["jlcpcb"] = f"unavailable: {e}"
         return
-
-    # Credential check up front: no keys -> honest skip, not the demo scraper.
-    if not (os.environ.get("JLCPCB_KEY") and os.environ.get("JLCPCB_SECRET")):
-        report.skipped["jlcpcb"] = "no credentials"
-        return
-
     try:
         iface = JlcPartsInterface()
         rows = iface.search_components([query], max_results=max_results)
     except Exception as e:
         report.skipped["jlcpcb"] = f"query error: {e}"
         return
-
     for row in rows:
         stock = int(row.get("stock", 0) or 0)
         if stock < min_stock:
@@ -141,6 +148,35 @@ def _check_jlcpcb(query: str, min_stock: int, max_results: int, report):
                 stock=stock,
                 unit_price=_coerce_price(row.get("price")),
                 datasheet_url=row.get("datasheet"),
+                lcsc=row.get("lcsc_part"),
+            )
+        )
+
+
+def _jlcpcb_keyless(query: str, min_stock: int, max_results: int, report):
+    """Keyless tscircuit JLCSearch mirror (source ``jlcpcb:jlcsearch``)."""
+    try:
+        from .jlcpcb.jlcsearch import search_jlcsearch
+    except Exception as e:
+        report.skipped["jlcpcb"] = f"unavailable: {e}"
+        return
+    try:
+        rows = search_jlcsearch(query, max_results=max_results)
+    except Exception as e:
+        report.skipped["jlcpcb"] = f"query error (jlcsearch): {e}"
+        return
+    for row in rows:
+        stock = int(row.get("stock", 0) or 0)
+        if stock < min_stock:
+            continue
+        report.results.append(
+            PartAvailability(
+                query=query,
+                source="jlcpcb:jlcsearch",
+                mpn=row.get("mpn") or row.get("lcsc") or query,
+                stock=stock,
+                unit_price=_coerce_price(row.get("price")),
+                lcsc=row.get("lcsc"),
             )
         )
 

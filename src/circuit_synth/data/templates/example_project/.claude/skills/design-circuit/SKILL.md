@@ -39,9 +39,11 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   missing MCP server must not stop the loop.
 - **Sourcing / availability (OPTIONAL — only when the user asks for real parts,
   a BOM, or sourcing, or supplies MPNs).** Check real stock/price:
-  `PYTHONUTF8=1 uv run python tools/check_availability.py "<query>"`. It queries
-  the credentialed DigiKey/JLCPCB APIs only (never fake data) and prints a
-  `skipped: <source> -- no credentials` line for any source without keys.
+  `PYTHONUTF8=1 uv run python tools/check_availability.py "<query>"`. **JLCPCB
+  works without any credentials** (via the keyless tscircuit JLCSearch mirror,
+  rows tagged `jlcpcb:jlcsearch`); DigiKey needs `DIGIKEY_CLIENT_ID`/`_SECRET`
+  and is skipped otherwise. It never returns fake data and prints a
+  `skipped: <source> -- <reason>` line for any source it could not query.
   - Record a `### Sourcing` table in the iteration-plan block with columns
     `| ref | MPN | source | stock | price | note |`.
   - **Honesty rule:** if a source was skipped (no credentials / network error),
