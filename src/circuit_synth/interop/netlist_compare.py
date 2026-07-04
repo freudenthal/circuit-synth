@@ -117,6 +117,10 @@ class ParsedNetlist:
     components: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # list of nets, each a set of (ref, pin)
     nets: List[Set[Pin]] = field(default_factory=list)
+    # net name -> set of (ref, pin) (names may be auto-generated / non-unique across
+    # tools, so use ``nets``/``partition`` for equivalence and this only when the
+    # human-facing net name matters, e.g. power detection / label matching)
+    named_nets: Dict[str, Set[Pin]] = field(default_factory=dict)
 
     def partition(self, ignore_pseudo: bool = True) -> Set[FrozenSet[Pin]]:
         """The set of pin-groups (empty groups dropped)."""
@@ -162,6 +166,9 @@ def parse_netlist(path: Union[str, Path]) -> ParsedNetlist:
             if ref and pin:
                 pins.add((ref, pin))
         result.nets.append(pins)
+        name = _field(net, "name")
+        if name:
+            result.named_nets[name] = pins
 
     return result
 

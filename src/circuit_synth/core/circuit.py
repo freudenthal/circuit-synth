@@ -616,6 +616,7 @@ class Circuit:
         update_source_refs: Optional[bool] = None,
         preserve_user_components: bool = False,
         erc_gate: bool = False,
+        selective_wires: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a complete KiCad project (schematic + PCB) from this circuit.
@@ -643,6 +644,11 @@ class Circuit:
                      3 times (default: False). Residual violations are returned in
                      `result["erc_report"]`. If kicad-cli is unavailable this is a
                      warning, not a failure.
+            selective_wires: Draw real wires for simple 2-pin, short, same-sheet,
+                     non-power local nets (instead of leaving them as labels only) as
+                     a post-generation readability pass (default: False). Guarded by a
+                     netlist-equivalence check that reverts if a wire would change
+                     connectivity. Summary on `result["selective_wires"]`.
 
         Returns:
             dict: Result dictionary containing:
@@ -789,6 +795,23 @@ class Circuit:
                 }
 
                 root_sch = output_path / f"{project_base_name}.kicad_sch"
+
+                # Post-generation readability pass: draw wires for simple local nets.
+                if selective_wires and root_sch.exists():
+                    try:
+                        from ..kicad.sch_gen.selective_wiring import wire_local_nets
+
+                        wire_result = wire_local_nets(str(root_sch))
+                        success_result["selective_wires"] = wire_result
+                        context_logger.info(
+                            "Selective wiring drew %d wire(s)",
+                            wire_result.get("wires_drawn", 0),
+                            component="CIRCUIT",
+                        )
+                    except Exception as e:  # never fail generation over a cosmetic pass
+                        context_logger.warning(
+                            f"Selective wiring skipped: {e}", component="CIRCUIT"
+                        )
 
                 # Post-generation ERC gate (opt-in).
                 if erc_gate and root_sch.exists():
