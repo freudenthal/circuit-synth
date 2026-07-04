@@ -1195,7 +1195,13 @@ class SpiceConverter:
         return ""
 
     def _add_current_source(self, component, ref: str, value: str):
-        """Add current source to SPICE circuit."""
+        """Add current source to SPICE circuit.
+
+        Symbol-aware, mirroring ``_add_voltage_source``: ``ISIN`` carries an AC
+        magnitude (for ``.ac``) plus a transient sinusoid, ``IPULSE``/``IPWL`` get
+        their waveforms, and ``IDC``/default stays a plain DC current. Without this
+        an ``ISIN`` source injected only DC, so AC analysis saw zero drive.
+        """
         nodes = self._get_component_nodes(component)
         if len(nodes) < 2:
             logger.warning(
@@ -1203,17 +1209,64 @@ class SpiceConverter:
             )
             return
 
-        # Parse current value
-        current = self._convert_value_to_spice(value or "1mA", "I")
         # Mark this source's nets so the net-name heuristic won't double-drive them.
         self.driven_nets.update(self._component_net_names(component))
 
-        # Add current source. nodes[] is pin-number ordered (pin 1 = +, pin 2 = -);
-        # ngspice current flows from + node, through the source, to the - node.
-        self.spice_circuit.I(ref, nodes[0], nodes[1], current)
+        symbol = (getattr(component, "symbol", "") or "").upper()
+        params = self._source_params(component)
+        spec = self._current_source_spec(symbol, value, params)
+
+        # nodes[] is pin-number ordered (pin 1 = +, pin 2 = -); ngspice current
+        # flows from the + node, through the source, to the - node.
+        self.spice_circuit.I(ref, nodes[0], nodes[1], spec)
         logger.debug(
-            f"Added current source {ref}: {nodes[0]} -> {nodes[1]} = {current}A"
+            f"Added current source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {spec}"
         )
+
+    def _current_source_spec(self, symbol: str, value, params: dict):
+        """Build the SPICE current-source spec (string or float) from symbol+params.
+
+        Current-source analogue of ``_voltage_source_spec`` (units 'A'):
+
+        * ``ISIN``  -> ``DC <off> AC <acmag> SIN(<off> <ampl> <freq> <td> <theta>)``
+          -- one source serves both ``.ac`` (via AC magnitude) and ``.tran``.
+          ``value`` sets ampl+acmag by default.
+        * ``IPULSE`` -> ``PULSE(<i1> <i2> <td> <tr> <tf> <pw> <per>)``.
+        * ``IPWL``  -> ``PWL(<t1> <i1> ...)`` (from a ``points`` field).
+        * ``IDC`` / default -> a plain DC current (from ``value``, default 1 mA).
+        """
+        if "IPULSE" in symbol:
+            i1 = self._pick(params, ("i1", "initial", "low"), "0")
+            i2 = self._pick(
+                params,
+                ("i2", "pulsed", "high", "amplitude"),
+                self._wave_num(value, "1"),
+            )
+            td = self._pick(params, ("td", "delay"), "0")
+            tr = self._pick(params, ("tr", "rise"), "1n")
+            tf = self._pick(params, ("tf", "fall"), "1n")
+            pw = self._pick(params, ("pw", "width"), "0.5m")
+            per = self._pick(params, ("per", "period"), "1m")
+            return f"PULSE({i1} {i2} {td} {tr} {tf} {pw} {per})"
+
+        if "IPWL" in symbol:
+            pts = self._pwl_points(params)
+            if pts:
+                return f"PWL({pts})"
+            return self._convert_value_to_spice(value or "0A", "I")
+
+        if "ISIN" in symbol:
+            base = self._wave_num(value, "1")  # value sets ampl + AC mag by default
+            offset = self._pick(params, ("offset", "dc", "ioffset"), "0")
+            ampl = self._pick(params, ("amplitude", "ampl", "amp"), base)
+            freq = self._pick(params, ("frequency", "freq", "f"), "1k")
+            td = self._pick(params, ("td", "delay"), "0")
+            theta = self._pick(params, ("theta", "damping"), "0")
+            ac_mag = self._pick(params, ("ac", "ac_mag", "acmag"), base)
+            return f"DC {offset} AC {ac_mag} SIN({offset} {ampl} {freq} {td} {theta})"
+
+        # IDC / default: a plain DC current.
+        return self._convert_value_to_spice(value or "1mA", "I")
 
     @staticmethod
     def _pin_sort_key(num):

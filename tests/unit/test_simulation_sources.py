@@ -203,3 +203,179 @@ def test_explicit_source_drives_operating_point():
     result = _explicit_divider().simulate().operating_point()
     assert result.get_voltage("VIN") == pytest.approx(9.0, abs=0.01)
     assert result.get_voltage("VOUT") == pytest.approx(6.0, abs=0.01)
+
+
+# --- Current sources (report F7, stage 12.1) --------------------------------
+#
+# ``_add_current_source`` used to emit a DC-only current for EVERY current-source
+# symbol, so ``Simulation_SPICE:ISIN`` carried zero AC magnitude and AC analysis of
+# any current-driven circuit (photodiode / SiPM TIA) read -inf dB. The fix mirrors
+# the voltage-source path with a symbol-aware ``_current_source_spec``. PySpice names
+# the emitted current source ``II1`` (element letter 'I' + ref 'I1').
+
+
+def _isin_available() -> bool:
+    """True only if the KiCad ``Simulation_SPICE:ISIN`` symbol constructs."""
+    try:
+        from circuit_synth.simulation.converter import PYSPICE_AVAILABLE
+
+        if not PYSPICE_AVAILABLE:
+            return False
+        Component(symbol="Simulation_SPICE:ISIN", ref="I1", value="1")
+        return True
+    except Exception:
+        return False
+
+
+def _sim_current_symbol_available(symbol: str) -> bool:
+    """True only if ``symbol`` constructs (probed once, at import, no circuit ctx)."""
+    try:
+        from circuit_synth.simulation.converter import PYSPICE_AVAILABLE
+
+        if not PYSPICE_AVAILABLE:
+            return False
+        Component(symbol=symbol, ref="I1")
+        return True
+    except Exception:
+        return False
+
+
+_IPULSE_OK = _sim_current_symbol_available("Simulation_SPICE:IPULSE")
+_IDC_OK = _sim_current_symbol_available("Simulation_SPICE:IDC")
+
+
+def _i1_line(netlist: str) -> str:
+    """The emitted SPICE line for current source I1 (PySpice names it 'II1')."""
+    for line in netlist.splitlines():
+        if line.startswith("II1 "):
+            return line
+    raise AssertionError(f"no I source for I1 in netlist:\n{netlist}")
+
+
+def _isin_rc(value=None, **src_kwargs):
+    """1-current-source + 1-resistor circuit; ISIN drives NINV, R to GND."""
+
+    @circuit(name="ISIN_RC")
+    def _c():
+        kw = {"symbol": "Simulation_SPICE:ISIN", "ref": "I1"}
+        if value is not None:
+            kw["value"] = value
+        kw.update(src_kwargs)
+        i1 = Component(**kw)
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        ninv = Net("NINV")
+        gnd = Net("GND")
+        i1[1] += ninv
+        i1[2] += gnd
+        r1[1] += ninv
+        r1[2] += gnd
+
+    return _c()
+
+
+@pytest.mark.skipif(
+    not _isin_available(), reason="KiCad Simulation_SPICE:ISIN symbol not available"
+)
+def test_isin_emits_ac_magnitude_and_sine():
+    """ISIN value='1A' -> the line carries 'AC 1' (for .ac) and 'SIN(0 1 ...)'."""
+    line = _i1_line(_netlist(_isin_rc(value="1A"))).upper()
+    assert "AC 1" in line, line
+    assert "SIN(0 1 " in line, line
+
+
+@pytest.mark.skipif(
+    not _isin_available(), reason="KiCad Simulation_SPICE:ISIN symbol not available"
+)
+def test_isin_honors_param_overrides():
+    """amplitude/frequency/ac kwargs override the value-derived defaults."""
+    line = _i1_line(
+        _netlist(_isin_rc(value="1A", amplitude="2m", frequency="10k", ac="1m"))
+    ).upper()
+    assert "AC 1M" in line, line  # explicit ac= wins over value
+    assert "SIN(0 2M 10K " in line, line  # amplitude + frequency overrides
+
+
+@pytest.mark.skipif(
+    not _IPULSE_OK, reason="KiCad Simulation_SPICE:IPULSE symbol not available"
+)
+def test_ipulse_emits_pulse_waveform():
+    """IPULSE with i1/i2 -> a PULSE(...) spec starting '0 1m'."""
+
+    @circuit(name="IPULSE_RC")
+    def _c():
+        i1 = Component(
+            symbol="Simulation_SPICE:IPULSE", ref="I1", **{"i1": "0", "i2": "1m"}
+        )
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        ninv = Net("NINV")
+        gnd = Net("GND")
+        i1[1] += ninv
+        i1[2] += gnd
+        r1[1] += ninv
+        r1[2] += gnd
+
+    line = _i1_line(_netlist(_c())).upper()
+    assert "PULSE(0 1M " in line, line
+
+
+@pytest.mark.skipif(
+    not _IDC_OK, reason="KiCad Simulation_SPICE:IDC symbol not available"
+)
+def test_idc_stays_plain_dc():
+    """IDC value='5u' -> a plain 5 uA DC current, no AC/SIN text (no-regression)."""
+
+    @circuit(name="IDC_RC")
+    def _c():
+        i1 = Component(symbol="Simulation_SPICE:IDC", ref="I1", value="5u")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        ninv = Net("NINV")
+        gnd = Net("GND")
+        i1[1] += ninv
+        i1[2] += gnd
+        r1[1] += ninv
+        r1[2] += gnd
+
+    line = _i1_line(_netlist(_c())).upper()
+    assert "AC" not in line, line
+    assert "SIN" not in line, line
+    # 5u -> 5e-06 A
+    assert float(line.split()[3]) == pytest.approx(5e-6), line
+
+
+@pytest.mark.skipif(not _ngspice_loads(), reason="no loadable ngspice library")
+@pytest.mark.skipif(
+    not _isin_available(), reason="KiCad Simulation_SPICE:ISIN symbol not available"
+)
+def test_isin_ac_drives_current_rc_end_to_end():
+    """End-to-end: ISIN 1 A into R=1k || C -> passband = R (60 dBOhm), pole 1/(2piRC).
+
+    This is the property F7 broke: with a DC-only current source the AC sweep saw
+    zero drive and read -inf dB everywhere. A 1 A AC current into a 1 kOhm shunt
+    gives |V| = 1 kV = 60 dBOhm in the passband; the R||C corner is 1/(2*pi*R*C).
+    C = 159.15 nF -> fc ~= 1.0 kHz.
+    """
+    import numpy as np
+
+    R_OHM = 1000.0
+    C_F = 159.15e-9  # 1/(2*pi*1k*159.15n) ~= 1000 Hz
+    FC_HZ = 1.0 / (2.0 * np.pi * R_OHM * C_F)
+
+    @circuit(name="ISIN_AC_RC")
+    def _c():
+        i1 = Component(symbol="Simulation_SPICE:ISIN", ref="I1", value="1A")
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        cf = Component(symbol="Device:C", ref="C1", value="159.15nF")
+        ninv = Net("VOUT")
+        gnd = Net("GND")
+        i1[1] += ninv
+        i1[2] += gnd
+        r1[1] += ninv
+        r1[2] += gnd
+        cf[1] += ninv
+        cf[2] += gnd
+
+    result = _c().simulate().ac_analysis(10, 1e6, points=50)
+    assert result.passband_gain_db("VOUT") == pytest.approx(60.0, abs=0.1)
+    fc = result.cutoff_frequency("VOUT")
+    assert fc is not None
+    assert fc == pytest.approx(FC_HZ, rel=0.05)
