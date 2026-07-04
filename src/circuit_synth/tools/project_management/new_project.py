@@ -35,6 +35,29 @@ from .template_manager import CLAUDEMDGenerator, READMEGenerator, TemplateManage
 console = Console()
 
 
+def _claude_tooling_summary(project_path: Path) -> str:
+    """One-line tally of the AI tooling installed under ``.claude/``.
+
+    Counts skills (``.claude/skills/*/SKILL.md``) as well as agents and commands.
+    Earlier this listed only agents + commands -- both empty ``.gitkeep`` dirs in the
+    default scaffold -- so a user saw "0 agents, 0 commands" and wrongly concluded no
+    AI tooling was installed, even though the design-circuit skill ships (finding F1).
+    """
+    claude_dir = project_path / ".claude"
+    skill_files = sorted((claude_dir / "skills").glob("*/SKILL.md"))
+    skills = [p.parent.name for p in skill_files]
+    agents_count = len(list((claude_dir / "agents").rglob("*.md")))
+    commands_count = len(list((claude_dir / "commands").rglob("*.md")))
+
+    if skills:
+        skills_part = f"{len(skills)} skill{'s' if len(skills) != 1 else ''} " + (
+            f"({', '.join(skills)})"
+        )
+    else:
+        skills_part = "0 skills"
+    return f"{skills_part}, {agents_count} agents, {commands_count} commands"
+
+
 def create_claude_directory_from_templates(
     project_path: Path, developer_mode: bool = False
 ) -> None:
@@ -379,14 +402,8 @@ def main(
             copy_complete_claude_setup(
                 project_path, developer_mode=config.developer_mode
             )
-            agents_count = len(
-                list((project_path / ".claude" / "agents").rglob("*.md"))
-            )
-            commands_count = len(
-                list((project_path / ".claude" / "commands").rglob("*.md"))
-            )
             console.print(
-                f"Claude agents setup complete ({agents_count} agents, {commands_count} commands)",
+                f"Claude Code setup complete ({_claude_tooling_summary(project_path)})",
                 style="green",
             )
         except Exception as e:
@@ -437,12 +454,8 @@ def main(
         )
 
     if config.include_agents:
-        agents_count = len(list((project_path / ".claude" / "agents").rglob("*.md")))
-        commands_count = len(
-            list((project_path / ".claude" / "commands").rglob("*.md"))
-        )
         success_text += Text(
-            f"\nAI Agents: {agents_count} agents, {commands_count} commands available"
+            f"\nAI tooling: {_claude_tooling_summary(project_path)}"
         )
 
     console.print(Panel.fit(success_text, title="Success!", style="green"))

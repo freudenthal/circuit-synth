@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 import pytest
 
 from circuit_synth.tools.project_management.new_project import (
+    _claude_tooling_summary,
     check_kicad_installation,
     copy_complete_claude_setup,
     copy_example_project_template,
@@ -381,6 +382,51 @@ class TestRealFileOperations:
 # ============================================================================
 # Edge Cases and Error Handling
 # ============================================================================
+
+
+class TestClaudeToolingSummary:
+    """The bootstrap summary must count skills, not just agents/commands (F1)."""
+
+    def _make_claude(self, root, skills=(), agents=0, commands=0):
+        claude = root / ".claude"
+        for name in skills:
+            skill_dir = claude / "skills" / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("# skill", encoding="utf-8")
+        adir = claude / "agents"
+        adir.mkdir(parents=True, exist_ok=True)
+        for i in range(agents):
+            (adir / f"agent{i}.md").write_text("x", encoding="utf-8")
+        cdir = claude / "commands"
+        cdir.mkdir(parents=True, exist_ok=True)
+        for i in range(commands):
+            (cdir / f"cmd{i}.md").write_text("x", encoding="utf-8")
+        return root
+
+    def test_counts_and_names_the_skill(self, tmp_path):
+        """The default scaffold (design-circuit skill, no agents/commands) is named."""
+        root = self._make_claude(tmp_path, skills=["design-circuit"])
+        summary = _claude_tooling_summary(root)
+        assert "1 skill (design-circuit)" in summary
+        assert "0 agents" in summary and "0 commands" in summary
+
+    def test_no_longer_reports_zero_when_skill_present(self, tmp_path):
+        """Regression guard for F1: a present skill must not read as all-zero tooling."""
+        root = self._make_claude(tmp_path, skills=["design-circuit"])
+        assert _claude_tooling_summary(root) != "0 agents, 0 commands"
+        assert "skill" in _claude_tooling_summary(root)
+
+    def test_pluralizes_and_counts_agents_commands(self, tmp_path):
+        root = self._make_claude(
+            tmp_path, skills=["design-circuit", "edit-circuit"], agents=2, commands=3
+        )
+        summary = _claude_tooling_summary(root)
+        assert "2 skills" in summary
+        assert "2 agents" in summary and "3 commands" in summary
+
+    def test_zero_skills_reported_plainly(self, tmp_path):
+        root = self._make_claude(tmp_path, skills=(), agents=1, commands=0)
+        assert _claude_tooling_summary(root) == "0 skills, 1 agents, 0 commands"
 
 
 class TestEdgeCases:
