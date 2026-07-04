@@ -21,8 +21,6 @@ from circuit_synth.tools.project_management.new_project import (
     copy_complete_claude_setup,
     copy_example_project_template,
     create_claude_directory_from_templates,
-    create_claude_md,
-    create_project_readme,
 )
 
 # ============================================================================
@@ -83,42 +81,11 @@ def mock_template_dir(tmp_path):
 # ============================================================================
 
 
-class TestFileGeneration:
-    """Test that proper files are created with correct content"""
-
-    def test_creates_readme_md(self, temp_project_dir, mock_console):
-        """Test README.md is created with project name"""
-        project_name = "test_project"
-        create_project_readme(temp_project_dir, project_name, [])
-
-        readme_path = temp_project_dir / "README.md"
-        assert readme_path.exists(), "README.md should be created"
-
-        content = readme_path.read_text()
-        assert project_name in content, "README should contain project name"
-        assert "circuit-synth" in content.lower(), "README should mention circuit-synth"
-        assert "Quick Start" in content, "README should have Quick Start section"
-
-    def test_creates_claude_md(self, temp_project_dir, mock_console):
-        """Test CLAUDE.md is created with AI guidance"""
-        create_claude_md(temp_project_dir)
-
-        claude_md_path = temp_project_dir / "CLAUDE.md"
-        assert claude_md_path.exists(), "CLAUDE.md should be created"
-
-        content = claude_md_path.read_text()
-        assert "CLAUDE.md" in content, "Should have CLAUDE.md header"
-        assert "circuit-synth" in content, "Should mention circuit-synth"
-        assert "agent" in content.lower(), "Should mention agents"
-
-    def test_readme_includes_additional_libraries(self, temp_project_dir, mock_console):
-        """Test README includes additional KiCad libraries"""
-        additional_libs = ["CustomLib1", "CustomLib2"]
-        create_project_readme(temp_project_dir, "test", additional_libs)
-
-        content = (temp_project_dir / "README.md").read_text()
-        assert "CustomLib1" in content, "Should include first additional library"
-        assert "CustomLib2" in content, "Should include second additional library"
+# NOTE: README.md / CLAUDE.md content generation moved from the free functions
+# create_project_readme()/create_claude_md() into READMEGenerator/CLAUDEMDGenerator
+# in template_manager.py; that generated-file content is now covered by
+# test_new_project_cli.py's file-content-validation tests. The old free-function
+# tests were removed here rather than kept against a deleted API.
 
 
 # ============================================================================
@@ -149,22 +116,11 @@ class TestClaudeDirectoryStructure:
             claude_dir = temp_project_dir / ".claude"
             assert claude_dir.exists(), ".claude directory should be created"
 
-    @patch("circuit_synth.tools.project_management.new_project.register_circuit_agents")
-    def test_creates_agents_subdirectories(
-        self, mock_register, temp_project_dir, mock_console
-    ):
-        """Test agent category subdirectories are created"""
-        with patch("circuit_synth.tools.project_management.new_project.Path"):
-            # This will trigger fallback to basic setup
-            create_claude_directory_from_templates(
-                temp_project_dir, developer_mode=False
-            )
-
-            claude_dir = temp_project_dir / ".claude"
-            agents_dir = claude_dir / "agents"
-
-            # After fallback, register_circuit_agents is called
-            assert mock_register.called, "Should call register_circuit_agents"
+    # NOTE: the legacy register_circuit_agents() fallback was retired in Stage 3
+    # (template-based install replaced it); tests asserting that fallback is called
+    # on template failure were removed. Current .claude/agents+skills install is
+    # covered by test_creates_claude_directory above and, end-to-end, by
+    # test_new_project_cli.py.
 
     @patch("circuit_synth.tools.project_management.new_project.shutil.copytree")
     @patch("circuit_synth.tools.project_management.new_project.shutil.rmtree")
@@ -310,7 +266,8 @@ class TestKiCadInstallation:
         result = check_kicad_installation()
 
         assert result["kicad_installed"] is True, "Should detect KiCad as installed"
-        mock_console.print.assert_any_call("✅ KiCad found!", style="green")
+        # Output is emoji-free since the c3e79df emoji strip.
+        mock_console.print.assert_any_call("KiCad found!", style="green")
 
     @patch(
         "circuit_synth.tools.project_management.new_project.validate_kicad_installation"
@@ -324,7 +281,8 @@ class TestKiCadInstallation:
         assert (
             result["kicad_installed"] is False
         ), "Should detect KiCad as not installed"
-        mock_console.print.assert_any_call("❌ KiCad not found", style="red")
+        # Output is emoji-free since the c3e79df emoji strip.
+        mock_console.print.assert_any_call("KiCad not found", style="red")
 
     @patch(
         "circuit_synth.tools.project_management.new_project.validate_kicad_installation"
@@ -386,14 +344,12 @@ class TestRegressionBugs:
 
         # Create a mock pyproject.toml
         pyproject = temp_project_dir / "pyproject.toml"
-        pyproject.write_text(
-            """
+        pyproject.write_text("""
 [project]
 name = "test-project"
 version = "0.1.0"
 dependencies = ["circuit-synth"]
-"""
-        )
+""")
 
         content = pyproject.read_text()
         assert (
@@ -411,36 +367,6 @@ dependencies = ["circuit-synth"]
 
 class TestRealFileOperations:
     """Tests that create actual files to verify behavior"""
-
-    def test_create_readme_with_real_file(self, temp_project_dir):
-        """Test README creation with actual file I/O"""
-        project_name = "real_test_project"
-        additional_libs = ["TestLib1", "TestLib2"]
-
-        create_project_readme(temp_project_dir, project_name, additional_libs)
-
-        readme = temp_project_dir / "README.md"
-        assert readme.exists(), "README.md file should exist"
-        assert readme.is_file(), "README.md should be a file"
-        assert readme.stat().st_size > 100, "README.md should have content"
-
-        content = readme.read_text()
-        assert f"# {project_name}" in content, "Should have project title"
-        assert "TestLib1" in content, "Should include additional library 1"
-        assert "TestLib2" in content, "Should include additional library 2"
-
-    def test_create_claude_md_with_real_file(self, temp_project_dir):
-        """Test CLAUDE.md creation with actual file I/O"""
-        create_claude_md(temp_project_dir)
-
-        claude_md = temp_project_dir / "CLAUDE.md"
-        assert claude_md.exists(), "CLAUDE.md file should exist"
-        assert claude_md.is_file(), "CLAUDE.md should be a file"
-        assert claude_md.stat().st_size > 50, "CLAUDE.md should have content"
-
-        content = claude_md.read_text()
-        assert "# CLAUDE.md" in content, "Should have CLAUDE.md header"
-        assert "circuit-synth" in content, "Should mention circuit-synth"
 
     def test_directory_structure_created(self, temp_project_dir):
         """Test that proper directory structure is created"""
@@ -460,44 +386,20 @@ class TestRealFileOperations:
 class TestEdgeCases:
     """Test edge cases and error conditions"""
 
-    def test_creates_files_in_empty_directory(self, temp_project_dir):
-        """Test file creation in empty directory"""
-        assert list(temp_project_dir.iterdir()) == [], "Directory should be empty"
+    def test_missing_template_degrades_gracefully(self, temp_project_dir, mock_console):
+        """A missing packaged template must not crash; it still creates .claude.
 
-        create_project_readme(temp_project_dir, "test", [])
-        create_claude_md(temp_project_dir)
+        The legacy register_circuit_agents() fallback was retired in Stage 3; the
+        current contract on template-not-found is a PACKAGING ERROR message plus an
+        empty .claude directory, with no exception raised.
+        """
+        # Force the template-not-found branch (Path.exists -> False for the check).
+        with patch.object(Path, "exists", return_value=False):
+            create_claude_directory_from_templates(temp_project_dir)  # must not raise
 
-        files = list(temp_project_dir.iterdir())
-        assert len(files) == 2, "Should create 2 files"
-
-    def test_handles_special_characters_in_project_name(self, temp_project_dir):
-        """Test project names with special characters"""
-        special_name = "test-project_v2.0"
-
-        create_project_readme(temp_project_dir, special_name, [])
-
-        readme = temp_project_dir / "README.md"
-        content = readme.read_text()
-        assert special_name in content, "Should handle special characters in name"
-
-    @patch("circuit_synth.tools.project_management.new_project.register_circuit_agents")
-    def test_fallback_to_basic_setup_on_template_failure(
-        self, mock_register, temp_project_dir, mock_console
-    ):
-        """Test fallback to basic agent registration when templates fail"""
-        with patch(
-            "circuit_synth.tools.project_management.new_project.Path"
-        ) as mock_path:
-            # Mock Path to simulate template not found
-            mock_instance = MagicMock()
-            mock_instance.parent.parent.parent = temp_project_dir / "nonexistent"
-            mock_path.return_value = mock_instance
-
-            with patch.object(Path, "exists", return_value=False):
-                create_claude_directory_from_templates(temp_project_dir)
-
-                # Should fall back to register_circuit_agents
-                assert mock_register.called, "Should call fallback agent registration"
+        assert (
+            temp_project_dir / ".claude"
+        ).exists(), ".claude dir should still be created on template failure"
 
 
 # ============================================================================
