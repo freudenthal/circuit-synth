@@ -79,3 +79,51 @@ def test_generate_kicad_project_erc_gate_flag(tmp_path):
         pytest.skip("kicad-cli (KiCad 10) not available — gate skipped")
     assert report.error_count == 0
     assert report.autofixes_applied >= 1
+
+
+@circuit(name="TwoRail")
+def _two_rail():
+    # Two undriven power rails (VCC + GND) -> two power_pin_not_driven violations,
+    # mirroring the canary's multi-rail op-amp. The gate must flag both with
+    # *unique* #FLG references and run to completion (Stage 17.2, G3).
+    r1 = Component(symbol="Device:R", ref="R1", value="10k", footprint=R_FP)
+    r2 = Component(symbol="Device:R", ref="R2", value="10k", footprint=R_FP)
+    vcc, gnd, sig = Net("VCC"), Net("GND"), Net("SIG")
+    r1[1] += vcc
+    r1[2] += sig
+    r2[1] += sig
+    r2[2] += gnd
+
+
+def test_erc_gate_two_rails_unique_flags_runs_to_completion(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        _two_rail().generate_kicad_project(project_name="tworail", generate_pcb=False)
+    finally:
+        os.chdir(cwd)
+    sch = next(tmp_path.rglob("TwoRail.kicad_sch"))
+
+    before = _require_erc(sch)
+    assert (
+        sum(1 for v in before.violations if v.type == "power_pin_not_driven") >= 2
+    ), "expected two undriven rails"
+
+    # Runs to completion without propagating an exception.
+    report = erc_gate(str(sch))
+    assert report.autofixes_applied >= 2
+
+    # All #FLG references written are unique (the G3 collision would abort here).
+    import re
+
+    import kicad_sch_api as ksa
+
+    reloaded = ksa.load_schematic(str(sch))
+    flg_refs = [
+        str(c.reference)
+        for c in reloaded.components
+        if re.match(r"#FLG\d+$", str(c.reference))
+    ]
+    assert len(flg_refs) == len(set(flg_refs)), f"duplicate #FLG refs: {flg_refs}"
+    assert len(flg_refs) >= 2

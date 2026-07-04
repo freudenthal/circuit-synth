@@ -5,13 +5,19 @@ classification without running kicad-cli. The autofix + full loop are covered by
 the kicad-cli e2e in ``tests/e2e/test_erc_gate_autofix.py``.
 """
 
+import os
+from tempfile import TemporaryDirectory
+
 import pytest
 
+from circuit_synth import Component, Net, circuit
 from circuit_synth.kicad.sch_gen.erc_gate import (
     AUTOFIX_TYPES,
     ErcItem,
     ErcReport,
     ErcViolation,
+    _apply_power_flag_autofixes,
+    _next_flag_index,
     _parse_erc_json,
     classify,
 )
@@ -108,3 +114,126 @@ def test_empty_sheets_parse_to_no_violations():
     report = _parse_erc_json({"sheets": []}, "x.kicad_sch")
     assert report.violations == []
     assert report.error_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Stage 17.2 (G3): #FLG reference seeding avoids collisions across passes.
+# --------------------------------------------------------------------------- #
+
+
+def test_next_flag_index_empty_starts_at_one():
+    assert _next_flag_index(["R1", "C2", "#PWR001"]) == 1
+
+
+def test_next_flag_index_seeds_past_existing():
+    # A schematic already carrying #FLG07 must allocate #FLG08 next, not #FLG01.
+    assert _next_flag_index(["R1", "#FLG07", "#PWR001"]) == 8
+
+
+def test_next_flag_index_uses_max_not_count():
+    assert _next_flag_index(["#FLG01", "#FLG02"]) == 3
+    # A gap does not reset the counter: max wins.
+    assert _next_flag_index(["#FLG01", "#FLG05"]) == 6
+
+
+def test_next_flag_index_ignores_non_flag_refs():
+    # #FLAG.. / #PWR.. are not #FLG references.
+    assert _next_flag_index(["#FLAG3", "#PWR12"]) == 1
+
+
+def test_report_note_appears_in_summary():
+    report = ErcReport(violations=[], schematic_path="x.kicad_sch")
+    report.note = "autofix aborted on iteration 1: ValidationError: dup"
+    assert "autofix aborted" in report.summary()
+
+
+# --------------------------------------------------------------------------- #
+# Stage 17.2 (G3): applying the PWR_FLAG autofix twice must not collide on #FLG.
+# Uses kicad-sch-api (a hard dependency) + generation; no kicad-cli needed.
+# --------------------------------------------------------------------------- #
+
+R_FP = "Resistor_SMD:R_0603_1608Metric"
+
+
+@circuit(name="FlgDiv")
+def _flg_divider():
+    r1 = Component(symbol="Device:R", ref="R1", value="1k", footprint=R_FP)
+    r2 = Component(symbol="Device:R", ref="R2", value="2k", footprint=R_FP)
+    vin, vout, gnd = Net("VIN_5V"), Net("VOUT_3V3"), Net("GND")
+    r1[1] += vin
+    r1[2] += vout
+    r2[1] += vout
+    r2[2] += gnd
+
+
+def _generate_divider(tmpdir):
+    cwd = os.getcwd()
+    os.chdir(tmpdir)
+    try:
+        _flg_divider().generate_kicad_project(
+            project_name="flgdiv", generate_pcb=False
+        )
+    finally:
+        os.chdir(cwd)
+    from pathlib import Path
+
+    return next(Path(tmpdir).rglob("FlgDiv.kicad_sch"))
+
+
+def _flg_nums(sch_path):
+    import re
+
+    import kicad_sch_api as ksa
+
+    sch = ksa.load_schematic(str(sch_path))
+    nums = []
+    for c in sch.components:
+        m = re.match(r"#FLG0*(\d+)$", str(c.reference))
+        if m:
+            nums.append(int(m.group(1)))
+    return sorted(nums)
+
+
+def _report_for_power_symbols(sch_path):
+    import kicad_sch_api as ksa
+
+    sch = ksa.load_schematic(str(sch_path))
+    pwr_refs = [
+        str(c.reference)
+        for c in sch.components
+        if str(c.reference).startswith("#PWR")
+    ]
+    violations = [
+        ErcViolation(
+            type="power_pin_not_driven",
+            severity="error",
+            description="Input Power pin not driven by any Output Power pins",
+            items=[ErcItem(description=f"Symbol {ref} Pin 1 [Power input, Line]")],
+        )
+        for ref in pwr_refs
+    ]
+    return ErcReport(violations=violations, schematic_path=str(sch_path)), pwr_refs
+
+
+def test_apply_power_flag_autofixes_twice_does_not_collide():
+    """The G3 bug: a second autofix pass re-emitted #FLG01 and raised.
+
+    Applying the fix twice against the same file must seed past the first pass's
+    flags (#FLG02...) instead of colliding on #FLG01.
+    """
+    with TemporaryDirectory() as tmpdir:
+        sch = _generate_divider(tmpdir)
+        report, pwr_refs = _report_for_power_symbols(sch)
+        assert pwr_refs, "expected the divider's GND power symbol"
+
+        first = _apply_power_flag_autofixes(str(sch), report)
+        assert first >= 1
+        nums_after_first = _flg_nums(sch)
+        assert nums_after_first, "first pass should have added a #FLG"
+
+        # Second pass previously raised ValidationError (#FLG01 already exists).
+        second = _apply_power_flag_autofixes(str(sch), report)
+        assert second >= 1
+        nums_after_second = _flg_nums(sch)
+        # New flags were allocated above the existing ones -> no collision.
+        assert max(nums_after_second) > max(nums_after_first)

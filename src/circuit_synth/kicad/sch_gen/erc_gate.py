@@ -75,6 +75,7 @@ class ErcReport:
     schematic_path: str
     iterations: int = 1
     autofixes_applied: int = 0
+    note: Optional[str] = None
 
     @property
     def error_count(self) -> int:
@@ -92,6 +93,8 @@ class ErcReport:
         )
         if self.autofixes_applied:
             head += f"; {self.autofixes_applied} PWR_FLAG autofix(es) applied"
+        if self.note:
+            head += f" [{self.note}]"
         if not self.violations:
             return head + ". Clean."
         lines = [head + ":"]
@@ -215,6 +218,22 @@ def classify(violation: ErcViolation) -> str:
     return "autofix" if violation.type in AUTOFIX_TYPES else "report"
 
 
+_FLG_RE = re.compile(r"#FLG0*(\d+)$")
+
+
+def _next_flag_index(references) -> int:
+    """Return the first free ``#FLG`` numeric suffix given existing references.
+
+    Seeds past any ``#FLGnn`` already present so a second autofix pass (across
+    ``erc_gate()`` iterations) does not re-emit ``#FLG01`` and collide with a flag
+    written by the previous pass. ``#FLG07`` present -> 8; none present -> 1.
+    """
+    nums = [
+        int(m.group(1)) for ref in references if (m := _FLG_RE.match(str(ref)))
+    ]
+    return (max(nums) + 1) if nums else 1
+
+
 def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
     """Add a ``power:PWR_FLAG`` to each distinct power net flagged undriven.
 
@@ -240,9 +259,15 @@ def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
     sch = ksa.load_schematic(schematic_path)
     by_ref = {str(c.reference): c for c in sch.components}
 
+    # Seed the flag index past any #FLG refs already in the schematic. This
+    # function may be called more than once across erc_gate() iterations (fixing a
+    # subset each time), so restarting at 1 would re-emit #FLG01 and collide with
+    # the flags written by the previous iteration (KiCad-sch-api raises
+    # ValidationError on a duplicate reference).
+    flag_index = _next_flag_index(by_ref)
+
     flagged_nets = set()
     added = 0
-    flag_index = 1
     for ref in sorted(undriven_refs):
         comp = by_ref.get(ref)
         if comp is None:
@@ -294,11 +319,20 @@ def erc_gate(
     report = run_erc(schematic_path, kicad_cli_path)
     total_fixes = 0
     iteration = 1
+    abort_note: Optional[str] = None
 
     while iteration < max_iterations:
         if not any(classify(v) == "autofix" for v in report.violations):
             break
-        applied = _apply_power_flag_autofixes(str(schematic_path), report)
+        try:
+            applied = _apply_power_flag_autofixes(str(schematic_path), report)
+        except Exception as e:
+            # The gate's contract is "never break generation, always return an
+            # honest report". Contain a per-iteration autofix failure: end the loop
+            # and return the current report with a note, rather than propagating.
+            abort_note = f"autofix aborted on iteration {iteration}: {type(e).__name__}: {e}"
+            logger.warning("ERC gate: %s", abort_note)
+            break
         if applied == 0:
             break  # nothing actionable left; don't spin
         total_fixes += applied
@@ -307,4 +341,5 @@ def erc_gate(
 
     report.iterations = iteration
     report.autofixes_applied = total_fixes
+    report.note = abort_note
     return report
