@@ -439,6 +439,20 @@ def _apply_power_flag_autofixes(
 # --------------------------------------------------------------------------- #
 
 
+def _residual_errors(report: ErcReport) -> int:
+    """Count non-autofixable *error* violations -- the errors the gate cannot repair.
+
+    The revert guard compares this before/after an autofix iteration: the gate may
+    only ever reduce (or hold) the count of errors it can't fix; an iteration that
+    increases it (e.g. a wire that shorted two pins) is rolled back.
+    """
+    return sum(
+        1
+        for v in report.violations
+        if v.severity == "error" and classify(v) != "autofix"
+    )
+
+
 def erc_gate(
     schematic_path,
     max_iterations: int = 3,
@@ -456,28 +470,49 @@ def erc_gate(
     iteration = 1
     abort_note: Optional[str] = None
 
-    while iteration < max_iterations:
-        if not any(classify(v) == "autofix" for v in report.violations):
-            break
-        try:
-            # Rebuild the (ref, pin) -> net map each iteration -- the schematic
-            # changed on the previous pass, so a stale map would misattribute pins.
-            pin_net_map = _pin_net_map(str(schematic_path), cli)
-            applied = _apply_power_flag_autofixes(
-                str(schematic_path), report, pin_net_map
-            )
-        except Exception as e:
-            # The gate's contract is "never break generation, always return an
-            # honest report". Contain a per-iteration autofix failure: end the loop
-            # and return the current report with a note, rather than propagating.
-            abort_note = f"autofix aborted on iteration {iteration}: {type(e).__name__}: {e}"
-            logger.warning("ERC gate: %s", abort_note)
-            break
-        if applied == 0:
-            break  # nothing actionable left; don't spin
-        total_fixes += applied
-        iteration += 1
-        report = run_erc(schematic_path, cli)
+    # Snapshot dir for the revert-on-regression guard (stage 18.4). An autofix now
+    # draws wires near real symbol bodies, so a wire could in principle touch a third
+    # pin and create a NEW error; the gate must never leave the schematic worse.
+    backup_dir = Path(tempfile.mkdtemp(prefix="cs_ercgate_"))
+    try:
+        while iteration < max_iterations:
+            if not any(classify(v) == "autofix" for v in report.violations):
+                break
+            prev_residual = _residual_errors(report)
+            backup = backup_dir / "backup.kicad_sch"
+            try:
+                shutil.copyfile(str(schematic_path), backup)
+                # Rebuild the (ref, pin) -> net map each iteration -- the schematic
+                # changed on the previous pass, so a stale map would misattribute pins.
+                pin_net_map = _pin_net_map(str(schematic_path), cli)
+                applied = _apply_power_flag_autofixes(
+                    str(schematic_path), report, pin_net_map
+                )
+            except Exception as e:
+                # The gate's contract is "never break generation, always return an
+                # honest report". Contain a per-iteration autofix failure: end the
+                # loop and return the current report with a note, not propagate.
+                abort_note = f"autofix aborted on iteration {iteration}: {type(e).__name__}: {e}"
+                logger.warning("ERC gate: %s", abort_note)
+                break
+            if applied == 0:
+                break  # nothing actionable left; don't spin
+
+            new_report = run_erc(schematic_path, cli)
+            if _residual_errors(new_report) > prev_residual:
+                # This iteration made ERC worse -- roll the file back and stop. The
+                # returned report must reflect what is on disk (the restored file).
+                shutil.copyfile(backup, str(schematic_path))
+                abort_note = f"iteration {iteration} made ERC worse; reverted"
+                logger.warning("ERC gate: %s", abort_note)
+                report = run_erc(schematic_path, cli)
+                break
+
+            total_fixes += applied
+            iteration += 1
+            report = new_report
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
     report.iterations = iteration
     report.autofixes_applied = total_fixes

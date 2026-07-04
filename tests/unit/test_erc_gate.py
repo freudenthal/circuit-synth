@@ -6,9 +6,12 @@ the kicad-cli e2e in ``tests/e2e/test_erc_gate_autofix.py``.
 """
 
 import os
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+
+import circuit_synth.kicad.sch_gen.erc_gate as erc_gate_mod
 
 from circuit_synth import Component, Net, circuit
 from circuit_synth.kicad.sch_gen.erc_gate import (
@@ -323,3 +326,89 @@ def test_apply_power_flag_autofix_skips_unconnected_net():
         assert added == 0
         refs, _ = _flg_refs_and_positions(sch)
         assert refs == [], "no PWR_FLAG should be added on a dangling net"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 18.4: the gate reverts an iteration that increases non-autofixable errors.
+# Fully monkeypatched -- no kicad-cli, no real ERC.
+# --------------------------------------------------------------------------- #
+
+
+def _autofix_error():
+    return ErcViolation(
+        type="power_pin_not_driven",
+        severity="error",
+        description="Input Power pin not driven by any Output Power pins",
+        items=[ErcItem(description="Symbol #PWR001 Pin 1 [Power input, Line]")],
+    )
+
+
+def _nonautofix_error():
+    return ErcViolation(
+        type="pin_to_pin",
+        severity="error",
+        description="Pins of two nets are directly connected",
+        items=[],
+    )
+
+
+def _mk_report(violations):
+    return ErcReport(violations=list(violations), schematic_path="x.kicad_sch")
+
+
+def _patch_gate(monkeypatch, report_sequence):
+    """Wire erc_gate() free of kicad-cli: scripted run_erc, no-op map, mutating
+    autofix that writes a marker so a revert is observable."""
+    reports = iter(report_sequence)
+    monkeypatch.setattr(erc_gate_mod, "_find_kicad_cli", lambda *a, **k: "dummy-cli")
+    monkeypatch.setattr(erc_gate_mod, "_pin_net_map", lambda *a, **k: {})
+    monkeypatch.setattr(erc_gate_mod, "run_erc", lambda *a, **k: next(reports))
+
+    def _fake_apply(path, report, pin_net_map):
+        Path(path).write_text("MUTATED", encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(erc_gate_mod, "_apply_power_flag_autofixes", _fake_apply)
+
+
+def test_erc_gate_reverts_iteration_that_makes_erc_worse(tmp_path, monkeypatch):
+    sch = tmp_path / "s.kicad_sch"
+    original = "ORIGINAL-CONTENT\n"
+    sch.write_text(original, encoding="utf-8")
+
+    # initial: one autofixable error (residual 0). after autofix: a NEW non-autofix
+    # error (residual 1 > 0) -> revert. after revert: re-run reflects restored file.
+    _patch_gate(
+        monkeypatch,
+        [
+            _mk_report([_autofix_error()]),
+            _mk_report([_nonautofix_error()]),
+            _mk_report([_nonautofix_error()]),
+        ],
+    )
+
+    report = erc_gate_mod.erc_gate(str(sch))
+
+    assert sch.read_text(encoding="utf-8") == original  # file rolled back
+    assert report.note and "reverted" in report.note
+    assert report.autofixes_applied == 0  # the reverted iteration does not count
+
+
+def test_erc_gate_keeps_iteration_that_improves_erc(tmp_path, monkeypatch):
+    sch = tmp_path / "s.kicad_sch"
+    sch.write_text("ORIGINAL", encoding="utf-8")
+
+    # initial: one autofixable error. after autofix: clean -> no revert, fix kept.
+    _patch_gate(
+        monkeypatch,
+        [
+            _mk_report([_autofix_error()]),
+            _mk_report([]),
+        ],
+    )
+
+    report = erc_gate_mod.erc_gate(str(sch))
+
+    assert report.note is None  # nothing reverted
+    assert report.autofixes_applied == 1
+    assert sch.read_text(encoding="utf-8") == "MUTATED"  # the fix stayed on disk
