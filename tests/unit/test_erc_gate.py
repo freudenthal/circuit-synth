@@ -86,6 +86,39 @@ def test_violation_references():
     assert report.violations[1].references == []
 
 
+# --------------------------------------------------------------------------- #
+# Stage 18.1: ERC items expose the flagged pin number; violations expose ref_pins.
+# --------------------------------------------------------------------------- #
+
+
+def test_item_pin_extraction():
+    # A real op-amp rail item carries the pin number after "Pin".
+    assert (
+        ErcItem(description="Symbol U1 Pin 8 [+V_{S}, Power input, Line]").pin == "8"
+    )
+    assert (
+        ErcItem(description="Symbol U1 Pin 8 [+V_{S}, Power input, Line]").reference
+        == "U1"
+    )
+    assert ErcItem(description="Symbol #PWR001 Pin 1 [Power input, Line]").pin == "1"
+    # A non-symbol item (e.g. a label) has no pin.
+    assert ErcItem(description="Label 'VIN_5V'").pin is None
+
+
+def test_violation_ref_pins():
+    v = ErcViolation(
+        type="power_pin_not_driven",
+        severity="error",
+        description="Input Power pin not driven by any Output Power pins",
+        items=[
+            ErcItem(description="Symbol U1 Pin 8 [+V_{S}, Power input, Line]"),
+            ErcItem(description="Symbol U1 Pin 5 [-V_{S}, Power input, Line]"),
+            ErcItem(description="Label 'VIN_5V'"),  # no ref/pin -> excluded
+        ],
+    )
+    assert v.ref_pins == [("U1", "8"), ("U1", "5")]
+
+
 def test_classify_only_power_pin_not_driven_is_autofix():
     report = _parse_erc_json(_KICAD10_ERC, "x.kicad_sch")
     assert classify(report.violations[0]) == "autofix"

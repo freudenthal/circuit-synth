@@ -21,11 +21,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ AUTOFIX_TYPES = {"power_pin_not_driven"}
 # Regex to pull a component reference (e.g. "#PWR001", "U1") out of an ERC item
 # description like: 'Symbol #PWR001 Pin 1 [Power input, Line]'.
 _REF_RE = re.compile(r"Symbol\s+(\S+)\s+Pin")
+
+# Same shape but also captures the pin number (group 2), e.g. from
+# 'Symbol U1 Pin 8 [+V_{S}, Power input, Line]' -> ("U1", "8").
+_REF_PIN_RE = re.compile(r"Symbol\s+(\S+)\s+Pin\s+(\S+)")
 
 
 class ErcUnavailable(RuntimeError):
@@ -53,6 +58,12 @@ class ErcItem:
         m = _REF_RE.search(self.description or "")
         return m.group(1) if m else None
 
+    @property
+    def pin(self) -> Optional[str]:
+        """The flagged pin number, e.g. "8" from '... Pin 8 [+V_{S}, ...]'."""
+        m = _REF_PIN_RE.search(self.description or "")
+        return m.group(2) if m else None
+
 
 @dataclass
 class ErcViolation:
@@ -65,6 +76,15 @@ class ErcViolation:
     @property
     def references(self) -> List[str]:
         return [it.reference for it in self.items if it.reference]
+
+    @property
+    def ref_pins(self) -> List[Tuple[str, str]]:
+        """[(ref, pin)] for every item that names both a symbol and a pin."""
+        out: List[Tuple[str, str]] = []
+        for it in self.items:
+            if it.reference and it.pin:
+                out.append((it.reference, it.pin))
+        return out
 
 
 @dataclass
