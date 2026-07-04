@@ -902,6 +902,10 @@ class SpiceConverter:
     # filter's response is the RC network alone.
     OPAMP_OPEN_LOOP_GAIN = 1e6
 
+    # Output-typed pins that aren't the real signal output on some dual-output
+    # op-amp symbols (e.g. ADA4817 pin 2 is FB). Prefer a pin not named these.
+    _OPAMP_NON_OUTPUT_PIN_NAMES = {"FB", "COMP"}
+
     def _opamp_terminals(self, component):
         """Resolve an op-amp's (out, in+, in-) SPICE nodes by pin function/name.
 
@@ -916,7 +920,8 @@ class SpiceConverter:
         pin_map = getattr(component, "_pins", None)
         if not isinstance(pin_map, dict):
             return None
-        out = in_plus = in_minus = None
+        outputs = []  # (pin_name, node) for every connected output-func pin
+        in_plus = in_minus = None
         for pin in pin_map.values():
             net = getattr(pin, "net", None)
             if net is None:
@@ -925,14 +930,47 @@ class SpiceConverter:
             name = (getattr(pin, "name", "") or "").strip()
             node = self.node_map.get(net.name, net.name)
             if "output" in func:
-                out = node
+                outputs.append((name, node))
             elif name == "+":
                 in_plus = node
             elif name == "-":
                 in_minus = node
+        out = self._choose_opamp_output(component, outputs)
         if out is None or in_plus is None or in_minus is None:
             return None
         return out, in_plus, in_minus
+
+    def _choose_opamp_output(self, component, outputs):
+        """Pick the real output node from an op-amp's output-func pins.
+
+        Some symbols expose more than one output-typed pin -- e.g. ADA4817 has pin 2
+        ``FB`` (feedback, output-typed) and pin 7 ``OUT``. The old code kept whichever
+        was iterated last (dict order), so a symbol with FB and OUT on *different*
+        nets resolved nondeterministically and could open the feedback loop silently
+        (report F4). The ideal VCVS has no separate feedback concept, so drive the
+        true OUT: prefer a pin whose name isn't ``FB``/``COMP``. When output pins land
+        on more than one distinct net, warn -- the single-output model can't represent
+        that, so the user should know which pin was driven.
+        """
+        if not outputs:
+            return None
+        preferred = [
+            (n, node)
+            for (n, node) in outputs
+            if n.upper() not in self._OPAMP_NON_OUTPUT_PIN_NAMES
+        ]
+        chosen_name, chosen_node = (preferred or outputs)[0]
+        if len({node for (_, node) in outputs}) > 1:
+            ref = getattr(component, "ref", None) or "?"
+            ignored = ", ".join(
+                sorted(f"{n}->{node}" for (n, node) in outputs if node != chosen_node)
+            )
+            logger.warning(
+                f"Op-amp {ref} has output pins on multiple nets; driving "
+                f"'{chosen_name}'->{chosen_node}, ignoring {ignored}. The ideal VCVS "
+                f"models a single output -- verify this matches intent."
+            )
+        return chosen_node
 
     def _add_opamp(self, component, ref: str, value: str):
         """Add an op-amp as an ideal VCVS: Vout = Aol * (V(in+) - V(in-)).

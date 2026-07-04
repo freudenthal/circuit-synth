@@ -120,6 +120,104 @@ def _ngspice_loads() -> bool:
         return False
 
 
+# --- Dual-output symbols: deterministic OUT vs FB resolution (report F4) -----
+#
+# Some op-amp symbols expose two output-typed pins -- e.g. ADA4817-1ACP has pin 2
+# FB (feedback, output-typed) and pin 7 OUT. The old code kept whichever iterated
+# last, so with FB and OUT on different nets the ideal VCVS could drive the wrong
+# node and silently open the loop. The fix prefers the non-FB pin and warns when
+# output pins span more than one net.
+import logging
+
+
+def _ada4817_available() -> bool:
+    try:
+        Component(symbol="Amplifier_Operational:ADA4817-1ACP", ref="U1")
+        return True
+    except Exception:
+        return False
+
+
+ada4817 = pytest.mark.skipif(
+    not _ada4817_available(),
+    reason="KiCad Amplifier_Operational:ADA4817-1ACP symbol not available",
+)
+
+
+def _ada4817_amp(fb_net_name, out_net_name):
+    """ADA4817 with in- = NINV, in+ = GND, FB (pin 2) and OUT (pin 7) as given.
+
+    fb_net_name == out_net_name reproduces the E2E workaround (FB tied to VOUT);
+    distinct names reproduce the ambiguous case F4 addresses.
+    """
+
+    @circuit(name="ada4817_amp")
+    def _c():
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="1")
+        u1 = Component(symbol="Amplifier_Operational:ADA4817-1ACP", ref="U1")
+        rf = Component(symbol="Device:R", ref="RF", value="100k")
+        rfb = Component(symbol="Device:R", ref="RFB", value="1k")  # keeps FB net live
+        ninv = Net("NINV")
+        gnd = Net("GND")
+        vout = Net(out_net_name)
+        fb = Net(fb_net_name)
+        vpos = Net("VPOS")
+        vneg = Net("VNEG")
+        v1[1] += ninv
+        v1[2] += gnd
+        u1[3] += ninv  # in-
+        u1[4] += gnd  # in+
+        u1[2] += fb  # FB (output-typed)
+        u1[7] += vout  # OUT (the real output)
+        u1[8] += vpos
+        u1[5] += vneg
+        u1[1] += vpos
+        u1[9] += vneg
+        rf[1] += ninv  # feedback resistor closes NINV <-> OUT
+        rf[2] += vout
+        rfb[1] += fb  # a second pin on the FB net so it isn't a floating node
+        rfb[2] += gnd
+
+    return _c()
+
+
+@ada4817
+def test_dual_output_prefers_non_fb_pin(caplog):
+    """FB and OUT on different nets -> the VCVS drives OUT (non-FB), and warns."""
+    with caplog.at_level(logging.WARNING, logger="circuit_synth.simulation.converter"):
+        parts = _e_line(_netlist(_ada4817_amp("VFB", "VOUT")), "U1")
+    assert parts[1] == "VOUT", f"should drive the non-FB OUT pin: {parts}"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("U1" in m and "VFB" in m for m in warnings), warnings
+
+
+@ada4817
+def test_dual_output_same_net_no_warning(caplog):
+    """FB tied to VOUT (E2E workaround wiring) -> same node, no ambiguity warning."""
+    with caplog.at_level(logging.WARNING, logger="circuit_synth.simulation.converter"):
+        parts = _e_line(_netlist(_ada4817_amp("VOUT", "VOUT")), "U1")
+    assert parts[1] == "VOUT", parts
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "output pins on multiple nets" in r.getMessage()
+    ]
+    assert not warnings, warnings
+
+
+def test_single_output_opamp_no_warning(caplog):
+    """A plain single-output op-amp (LM358) resolves without any ambiguity warning."""
+    with caplog.at_level(logging.WARNING, logger="circuit_synth.simulation.converter"):
+        parts = _e_line(_netlist(_noninv_amp()), "U1")
+    assert parts[1] == "VOUT", parts
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if "output pins on multiple nets" in r.getMessage()
+    ]
+    assert not warnings, warnings
+
+
 @pytest.mark.skipif(not _ngspice_loads(), reason="no loadable ngspice library")
 def test_noninverting_closed_loop_gain():
     """End-to-end: the ideal op-amp gives the analytic closed-loop gain.
