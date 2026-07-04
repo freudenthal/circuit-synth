@@ -10,6 +10,18 @@ iterations (max **5**). Keep an append-only `design_log.md` in the project root;
 after every iteration append: iteration number, what changed, generation result,
 simulation measurements, PASS/FAIL per criterion, and the next action.
 
+## Two modes: NEW design vs EDIT existing
+
+- **NEW design** (no matching `.py` yet, or the user asks for a fresh circuit):
+  run the full loop below starting at Phase 0.
+- **EDIT an existing design** (the user asks to change/tweak/fix a circuit that
+  already has a `circuit-synth/*.py` in this project — "make R3 4.7k", "add a
+  bypass cap on VOUT", "raise the cutoff to 10 kHz"): jump to the
+  **"Editing an existing design"** section near the end. The short version:
+  change the **Python source**, regenerate in update mode (placement is
+  preserved), and re-simulate — do **not** hand-edit the generated `.kicad_sch`
+  for value/topology changes; the next regeneration overwrites such edits.
+
 ## Phase 0 — SETUP (once)
 - Read `circuit-synth/main.py` — it is a known-good example of the API pattern.
 - Windows note: run every command with UTF-8 mode, e.g. in bash
@@ -182,3 +194,46 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   - Same failure twice in a row → change strategy, don't repeat the edit.
 - Iteration 5 still failing → stop; report best attempt, remaining gaps, and
   what a human should look at. An honest partial beats a false success.
+
+## Editing an existing design
+
+Use this when the user asks to modify a circuit that already has a
+`circuit-synth/*.py` source in this project. The design's **source of truth is
+the Python file**, not the `.kicad_sch` — every downstream step (simulation,
+`Sim.*` model controls, `validate()`, sourcing/BOM) reads the Python circuit, so
+edits must go there. In-place edits to the generated `.kicad_sch` are invisible
+to those steps and are **overwritten the next time the project is regenerated**.
+
+1. **Locate the source.** Find the `circuit-synth/*.py` whose
+   `generate_kicad_project(project_name=...)` matches the project the user means
+   (usually `main.py` or the one named after the target). If several could
+   match, ask which; never guess and hand-edit the `.kicad_sch`.
+2. **Change the Python.** Make the requested edit in code — component values,
+   added/removed components, net connections, `Sim.*` kwargs, MPN/Manufacturer
+   kwargs. Follow the same API patterns as the rest of the file.
+3. **Regenerate in update mode (placement-preserving).** Re-run the file:
+   `PYTHONUTF8=1 uv run python circuit-synth/<name>.py`. Keep the default
+   `generate_kicad_project(..., generate_pcb=False)` — its default
+   `force_regenerate=False` performs an **update**: components are matched by
+   UUID/reference/topology, so existing parts keep their manual KiCad placement
+   while your change is applied and any new part is dropped in a free column to
+   the right (reposition later in KiCad). **Do not pass `force_regenerate=True`**
+   unless the user explicitly accepts losing all manual placement — it rewrites
+   the schematic from scratch. Verify the edit landed the same way Phase 4 does
+   (the changed value / new `(symbol` block is present in the `.kicad_sch`).
+4. **Re-simulate and re-examine (Phases 5–6)** for the criteria the edit
+   affects. Append a new block to `design_log.md` headed
+   `## Iteration N — edit`: state what the user asked, the code change, the
+   regeneration result (updated/preserved/added), the new measurements vs. the
+   criteria (PASS/FAIL), and an embedded plot if you produced one.
+5. **Iterate** as in Phase 6 if the edit didn't meet its criterion.
+
+**MCP boundary.** The kicad-sch-api MCP server (if connected) stays a
+**read-only helper** in this loop — pin lookups (`get_component_pins`,
+`find_pins_by_name`) during Phase 2. Its editing tools (`add_component`,
+`add_wire`, `bulk_update_components`, …) directly mutate a `.kicad_sch`; on a
+project that has a circuit-synth `.py` source, those edits diverge from the
+source and are lost on the next regeneration, so **route every value/topology
+change back to the Python file**. The MCP editing tools are for schematics that
+have **no** circuit-synth source (foreign/hand-drawn `.kicad_sch`), which this
+skill does not manage.
