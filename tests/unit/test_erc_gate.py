@@ -275,25 +275,51 @@ def test_apply_power_flag_autofixes_twice_does_not_collide_or_stack():
     """The G3 bug: a second autofix pass re-emitted #FLG01 and raised.
 
     Applying the fix twice against the same file must (a) not raise -- seeding past
-    existing flags -- and (b) not stack a second flag on the same point (the
-    position guard), so all #FLG refs and positions stay unique.
+    existing flags -- and (b) not add a second flag to a net that already carries
+    one (the canonical-point guard), so all #FLG refs and positions stay unique and
+    the second pass is a no-op. The #PWR nets resolve via the symbol value, so the
+    passed map is irrelevant here (power symbols are absent from the netlist).
     """
     with TemporaryDirectory() as tmpdir:
         sch = _generate_divider(tmpdir)
         report, pwr_refs = _report_for_power_symbols(sch)
         assert pwr_refs, "expected the divider's GND power symbol"
 
-        first = _apply_power_flag_autofixes(str(sch), report)
+        first = _apply_power_flag_autofixes(str(sch), report, {})
         assert first >= 1
         refs_1, pos_1 = _flg_refs_and_positions(sch)
         assert refs_1, "first pass should have added a #FLG"
 
-        # Second pass previously raised ValidationError (#FLG01 already exists);
-        # now it must return cleanly (the GND flag's position is already occupied,
-        # so it is skipped rather than stacked).
-        second = _apply_power_flag_autofixes(str(sch), report)
-        assert isinstance(second, int)  # did not raise
+        # Second pass: the net's canonical flag point is already occupied, so it is
+        # skipped rather than stacked (and #FLG refs are seeded past the existing).
+        second = _apply_power_flag_autofixes(str(sch), report, {})
+        assert second == 0
 
         refs_2, pos_2 = _flg_refs_and_positions(sch)
         assert len(refs_2) == len(set(refs_2)), f"duplicate #FLG refs: {refs_2}"
         assert len(pos_2) == len(set(pos_2)), f"two flags stacked on a point: {pos_2}"
+
+
+def test_apply_power_flag_autofix_skips_unconnected_net():
+    """A flagged pin whose net is dangling (unconnected-*) must NOT get a flag --
+    that would mask a real design error. Returns 0, adds nothing."""
+    with TemporaryDirectory() as tmpdir:
+        sch = _generate_divider(tmpdir)
+        report = ErcReport(
+            violations=[
+                ErcViolation(
+                    type="power_pin_not_driven",
+                    severity="error",
+                    description="Input Power pin not driven by any Output Power pins",
+                    items=[
+                        ErcItem(description="Symbol R1 Pin 1 [Power input, Line]")
+                    ],
+                )
+            ],
+            schematic_path=str(sch),
+        )
+        pin_net_map = {("R1", "1"): "unconnected-(R1-Pad1)"}
+        added = _apply_power_flag_autofixes(str(sch), report, pin_net_map)
+        assert added == 0
+        refs, _ = _flg_refs_and_positions(sch)
+        assert refs == [], "no PWR_FLAG should be added on a dangling net"

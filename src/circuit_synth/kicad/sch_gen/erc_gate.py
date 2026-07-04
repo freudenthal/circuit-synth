@@ -292,20 +292,49 @@ def _next_flag_index(references) -> int:
     return (max(nums) + 1) if nums else 1
 
 
-def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
-    """Add a ``power:PWR_FLAG`` to each distinct power net flagged undriven.
+def _apply_power_flag_autofixes(
+    schematic_path: str,
+    report: ErcReport,
+    pin_net_map: Dict[Tuple[str, str], str],
+) -> int:
+    """Add a ``power:PWR_FLAG`` per undriven *net*, wired to the actual flagged pin.
 
-    Power symbols carry ``value`` == net name, so we dedupe by value: one flag per
-    net clears every ``power_pin_not_driven`` on that net. Returns the number of
-    flags added. Returns 0 (and logs) if kicad-sch-api is unavailable.
+    **Net resolution is hybrid** because ``kicad-cli sch export netlist`` omits power
+    pseudo-symbols (refs beginning with ``#`` -- ``#PWR``, and our own ``#FLG``):
+
+    - A flagged pin on a ``#``-prefixed power symbol resolves via the symbol's
+      ``value`` (a power symbol's value *is* the net name, and its only pin is "1").
+    - A flagged pin on a real part (e.g. an op-amp's +Vs/-Vs rails) resolves via the
+      netlist ``pin_net_map`` = (ref, pin) -> net name.
+
+    This fixes the Stage-17 limitation: the old code assumed ``value`` was the net
+    and always wired to pin "1", which only held for power symbols, so a real-part
+    rail (value == part number, pin "1" a signal pin) could never clear.
+
+    One flag per undriven net, wired to that net's deterministic anchor pin. Dangling
+    nets (``unconnected-*``) are skipped -- a flag there would mask a real error. The
+    canonical flag point (anchor pin + 5.08 mm) being already occupied is the
+    stack/re-flag guard: it is deterministic per net (same net -> same anchor -> same
+    point), so a flag written by a prior iteration blocks a duplicate here (this is
+    the stage-17 position guard, and it doubles as the "net already flagged" guard
+    since ``#FLG`` symbols are absent from the netlist).
+
+    Returns the number of flags added; returns 0 (and logs) if kicad-sch-api is
+    unavailable or nothing is actionable.
     """
-    undriven_refs = {
-        ref
-        for v in report.violations
-        if classify(v) == "autofix"
-        for ref in v.references
-    }
-    if not undriven_refs:
+    # Every flagged (ref, pin), plus its ERC-item position (a placement fallback for
+    # when the pin position cannot be resolved from the schematic).
+    undriven: List[Tuple[str, str]] = []
+    item_pos: Dict[Tuple[str, str], Tuple[Optional[float], Optional[float]]] = {}
+    for v in report.violations:
+        if classify(v) != "autofix":
+            continue
+        for it in v.items:
+            if it.reference and it.pin:
+                rp = (it.reference, it.pin)
+                undriven.append(rp)
+                item_pos.setdefault(rp, (it.x, it.y))
+    if not undriven:
         return 0
 
     try:
@@ -315,52 +344,71 @@ def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
         return 0
 
     sch = ksa.load_schematic(schematic_path)
-    by_ref = {str(c.reference): c for c in sch.components}
 
-    # Seed the flag index past any #FLG refs already in the schematic. This
-    # function may be called more than once across erc_gate() iterations (fixing a
-    # subset each time), so restarting at 1 would re-emit #FLG01 and collide with
-    # the flags written by the previous iteration (KiCad-sch-api raises
-    # ValidationError on a duplicate reference).
+    # Seed the flag index past any #FLG refs already present so a second pass (across
+    # erc_gate() iterations) does not re-emit #FLG01 and collide (stage 17.2).
+    by_ref = {str(c.reference): c for c in sch.components}
     flag_index = _next_flag_index(by_ref)
 
-    # Positions already occupied by a PWR_FLAG (from a prior iteration). A ref that
-    # the autofix cannot actually clear -- e.g. an op-amp whose power *rails* are
-    # undriven, where by_ref[value] is the part number (not a net) and pin "1" is a
-    # signal pin -- would otherwise get a fresh flag stacked on the same point every
-    # iteration, which ERC then reports as a pin_to_pin short between two flags.
-    # Never place two flags on one point (stage 17.2 follow-up).
     def _pt_key(x, y):
         return (round(float(x), 2), round(float(y), 2))
 
+    # Points already occupied by a PWR_FLAG (from a prior iteration) -- never stack.
     occupied = {
         _pt_key(c.position.x, c.position.y)
         for c in sch.components
         if str(c.reference).startswith("#FLG") and getattr(c, "position", None)
     }
 
-    flagged_nets = set()
+    def _net_of(ref: str, pin: str) -> Optional[str]:
+        # Power pseudo-symbols are excluded from the netlist -> use their value.
+        if ref.startswith("#"):
+            comp = by_ref.get(ref)
+            val = getattr(comp, "value", None) if comp is not None else None
+            return str(val) if val else None
+        return pin_net_map.get((ref, pin))
+
+    # Group flagged pins by the net they belong to.
+    net_pins: Dict[str, List[Tuple[str, str]]] = {}
+    for ref, pin in undriven:
+        net = _net_of(ref, pin)
+        if net is None:
+            logger.debug("ERC autofix: %s could not resolve to a net; skipping", (ref, pin))
+            continue
+        if net.startswith("unconnected-"):
+            # A genuinely dangling power pin -- a flag here masks a real error.
+            logger.debug("ERC autofix: %s on dangling net %r; report-only", (ref, pin), net)
+            continue
+        net_pins.setdefault(net, []).append((ref, pin))
+
     added = 0
-    for ref in sorted(undriven_refs):
-        comp = by_ref.get(ref)
-        if comp is None:
-            continue
-        net = getattr(comp, "value", None) or ref
-        if net in flagged_nets:
-            continue
-        pin_pos = sch.get_component_pin_position(ref, "1")
-        if pin_pos is None:
-            logger.debug("ERC autofix: no pin position for %s, skipping", ref)
-            continue
-        flag_pos = (pin_pos.x, pin_pos.y + 5.08)
+    for net in sorted(net_pins):
+        ref, pin = sorted(net_pins[net])[0]  # deterministic anchor pin
+        pos = sch.get_component_pin_position(ref, pin)
+        if pos is not None:
+            px, py = pos.x, pos.y
+        else:
+            fb = item_pos.get((ref, pin))
+            if not fb or fb[0] is None or fb[1] is None:
+                logger.debug(
+                    "ERC autofix: no pin position for %s pin %s; skipping", ref, pin
+                )
+                continue
+            px, py = fb
+
+        # Canonical flag point for this net. Deterministic (same net -> same anchor
+        # -> same point), so an existing flag here means the net is already flagged.
+        flag_pos = (px, py + 5.08)
         if _pt_key(*flag_pos) in occupied:
             logger.debug(
-                "ERC autofix: a PWR_FLAG already sits at %s (via %s); skipping to "
-                "avoid stacking flags",
-                flag_pos,
+                "ERC autofix: canonical flag point for net %r already occupied "
+                "(via %s pin %s); skipping to avoid stacking",
+                net,
                 ref,
+                pin,
             )
             continue
+
         flag_ref = f"#FLG{flag_index:02d}"
         flag_index += 1
         sch.components.add(
@@ -370,13 +418,16 @@ def _apply_power_flag_autofixes(schematic_path: str, report: ErcReport) -> int:
             position=flag_pos,
         )
         occupied.add(_pt_key(*flag_pos))
-        wire = sch.add_wire_between_pins(ref, "1", flag_ref, "1")
+        wire = sch.add_wire_between_pins(ref, pin, flag_ref, "1")
         if wire is None:
-            logger.debug("ERC autofix: could not wire PWR_FLAG to %s", ref)
+            logger.debug(
+                "ERC autofix: could not wire PWR_FLAG to %s pin %s", ref, pin
+            )
             continue
-        flagged_nets.add(net)
         added += 1
-        logger.info("ERC autofix: added PWR_FLAG on net '%s' (via %s)", net, ref)
+        logger.info(
+            "ERC autofix: added PWR_FLAG on net '%s' (via %s pin %s)", net, ref, pin
+        )
 
     if added:
         sch.save()
@@ -399,7 +450,8 @@ def erc_gate(
     ``autofixes_applied`` populated). Raises :class:`ErcUnavailable` if kicad-cli is
     missing -- callers that want graceful degradation should catch it.
     """
-    report = run_erc(schematic_path, kicad_cli_path)
+    cli = _find_kicad_cli(kicad_cli_path)
+    report = run_erc(schematic_path, cli)
     total_fixes = 0
     iteration = 1
     abort_note: Optional[str] = None
@@ -408,7 +460,12 @@ def erc_gate(
         if not any(classify(v) == "autofix" for v in report.violations):
             break
         try:
-            applied = _apply_power_flag_autofixes(str(schematic_path), report)
+            # Rebuild the (ref, pin) -> net map each iteration -- the schematic
+            # changed on the previous pass, so a stale map would misattribute pins.
+            pin_net_map = _pin_net_map(str(schematic_path), cli)
+            applied = _apply_power_flag_autofixes(
+                str(schematic_path), report, pin_net_map
+            )
         except Exception as e:
             # The gate's contract is "never break generation, always return an
             # honest report". Contain a per-iteration autofix failure: end the loop
@@ -420,7 +477,7 @@ def erc_gate(
             break  # nothing actionable left; don't spin
         total_fixes += applied
         iteration += 1
-        report = run_erc(schematic_path, kicad_cli_path)
+        report = run_erc(schematic_path, cli)
 
     report.iterations = iteration
     report.autofixes_applied = total_fixes

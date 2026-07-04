@@ -127,3 +127,89 @@ def test_erc_gate_two_rails_unique_flags_runs_to_completion(tmp_path):
     ]
     assert len(flg_refs) == len(set(flg_refs)), f"duplicate #FLG refs: {flg_refs}"
     assert len(flg_refs) >= 2
+
+
+# --------------------------------------------------------------------------- #
+# Stage 18.3 acceptance: an op-amp whose *power rails* are the undriven pins.
+# This is the case Stage 17 could not fix (value == part number, not the net, and
+# pin "1" is a signal pin). The net-aware autofix must clear both rails.
+# --------------------------------------------------------------------------- #
+
+OPAMP_FP = "Package_CSP:Analog_LFCSP-8-1EP_3x3mm_P0.5mm_EP1.53x1.85mm"
+
+
+@circuit(name="OpampRails")
+def _opamp_rails():
+    # Mirrors the canary's ADA4817 wiring (sipm_tia.py L93-108), minus the caps/SiPM.
+    # Pins accessed by number, exactly as the canary does.
+    u1 = Component(
+        symbol="Amplifier_Operational:ADA4817-1ACP",
+        ref="U1",
+        value="ADA4817-1ACP",
+        footprint=OPAMP_FP,
+    )
+    rf = Component(symbol="Device:R", ref="RF1", value="100k", footprint=R_FP)
+    ninv, vout, gnd = Net("NINV"), Net("VOUT"), Net("GND")
+    vpos, vneg = Net("V_POS_5V"), Net("V_NEG_5V")
+    u1[4] += gnd      # + (non-inverting input)
+    u1[3] += ninv     # - (inverting input)
+    u1[7] += vout     # OUT
+    u1[2] += vout     # FB -> VOUT (hardware-correct output tie)
+    u1[8] += vpos     # +Vs
+    u1[5] += vneg     # -Vs
+    u1[1] += vpos     # ~PD tied high (like the canary; makes pin 1 rail-tied)
+    u1[9] += vneg     # EP -> -Vs
+    rf[1] += ninv
+    rf[2] += vout
+
+
+def test_erc_gate_clears_opamp_power_rails(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        _opamp_rails().generate_kicad_project(
+            project_name="opamprails", generate_pcb=False
+        )
+    finally:
+        os.chdir(cwd)
+    sch = next(tmp_path.rglob("OpampRails.kicad_sch"))
+
+    before = _require_erc(sch)
+    assert (
+        sum(1 for v in before.violations if v.type == "power_pin_not_driven") >= 2
+    ), "expected the op-amp's two undriven rails to trip power_pin_not_driven"
+
+    report = erc_gate(str(sch))
+
+    # The headline: NO power_pin_not_driven remains -- both rails cleared. Stage 17
+    # could only ever clear the pin-1-accident rail, never V_NEG_5V.
+    assert not any(
+        v.type == "power_pin_not_driven" for v in report.violations
+    ), report.summary()
+    assert report.autofixes_applied >= 2
+
+    # No flag-vs-flag / flag-vs-pin short introduced by the autofix.
+    flag_shorts = [
+        v
+        for v in report.violations
+        if v.type == "pin_to_pin"
+        and any(str(r).startswith("#FLG") for r in v.references)
+    ]
+    assert not flag_shorts, f"autofix introduced a #FLG short: {report.summary()}"
+
+    # #FLG refs + positions all unique.
+    import re
+
+    import kicad_sch_api as ksa
+
+    reloaded = ksa.load_schematic(str(sch))
+    flg = [
+        (str(c.reference), (round(c.position.x, 2), round(c.position.y, 2)))
+        for c in reloaded.components
+        if re.match(r"#FLG\d+$", str(c.reference))
+    ]
+    refs = [r for r, _ in flg]
+    pos = [p for _, p in flg]
+    assert len(refs) == len(set(refs)), f"duplicate #FLG refs: {refs}"
+    assert len(pos) == len(set(pos)), f"two flags stacked on a point: {pos}"
