@@ -68,6 +68,37 @@ try:
                 logger.debug(f"Set ngspice library path: {_dll}")
                 break
 
+    # Quiet the benign "Unsupported Ngspice version 46" banner (finding F2). PySpice
+    # 1.5 whitelists ngspice only up to v34 in SimulationType.SIMULATION_TYPE, so
+    # KiCad's bundled v46 raises a KeyError on every NgSpiceShared init and logs a
+    # warning before harmlessly falling back to the last-known mapping (the node/type
+    # conventions are unchanged, verified against KiCad 10). Register the newer
+    # versions as aliases of that mapping so the KeyError -- and the warning -- never
+    # fire. Runtime-only: mutates the in-memory dict, never patches PySpice on disk.
+    try:
+        from PySpice.Spice.NgSpice import SimulationType as _sim_type
+
+        _sim_map = _sim_type.SIMULATION_TYPE
+        _last_map = _sim_map.get("last")
+        if _last_map is not None:
+            for _v in range(_sim_type.LAST_VERSION + 1, 101):
+                _sim_map.setdefault(_v, _last_map)
+    except Exception as _e:  # a cosmetic tweak must never break simulation
+        logger.debug(f"Could not pre-register newer ngspice versions: {_e}")
+
+    # Drop only the benign init-time "can't find the initialization file spinit"
+    # banner (finding F2). KiCad's ngspice ships no spinit and loads its codemodels
+    # itself, so the message is harmless -- but it's printed to stderr on every init.
+    # A narrow logging filter on PySpice's ngspice logger removes exactly that one
+    # line while leaving every real (sim-time) ngspice warning/error intact.
+    class _SpinitBannerFilter(logging.Filter):
+        def filter(self, record):
+            return "initialization file spinit" not in record.getMessage()
+
+    logging.getLogger("PySpice.Spice.NgSpice.Shared.NgSpiceShared").addFilter(
+        _SpinitBannerFilter()
+    )
+
 except ImportError as e:
     PYSPICE_AVAILABLE = False
     logger.warning(f"PySpice not available: {e}")

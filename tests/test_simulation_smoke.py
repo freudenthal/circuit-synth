@@ -66,3 +66,35 @@ def test_divider_operating_point():
 
     vin = result.get_voltage("VIN_5V")
     assert vin == pytest.approx(5.0, abs=0.01), f"VIN_5V={vin}, expected 5.0"
+
+
+def test_ngspice_init_banners_are_quiet():
+    """The benign v46 / spinit init banners don't reach the logs (finding F2).
+
+    Import-time fixes in ``simulation.simulator`` register KiCad's ngspice v46 as a
+    known version (kills "Unsupported Ngspice version 46") and filter the harmless
+    "can't find the initialization file spinit" line. Real sim-time warnings/errors
+    are untouched -- only these two init banners are silenced.
+    """
+    import logging
+
+    from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+
+    ngspice_logger = logging.getLogger("PySpice.Spice.NgSpice.Shared.NgSpiceShared")
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    ngspice_logger.addHandler(handler)
+    try:
+        NgSpiceShared.new_instance()
+    finally:
+        ngspice_logger.removeHandler(handler)
+
+    joined = "\n".join(records)
+    assert "Unsupported Ngspice version" not in joined, joined
+    assert "initialization file spinit" not in joined, joined
