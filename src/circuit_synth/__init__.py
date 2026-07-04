@@ -116,9 +116,6 @@ def print_version_info():
     print("=" * 60)
 
 
-# Plugin integration
-from .ai_integration.plugins import AIDesignBridge
-
 # Dependency injection imports
 # Exception imports
 # Core imports
