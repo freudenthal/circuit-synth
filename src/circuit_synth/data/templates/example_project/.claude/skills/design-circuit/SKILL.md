@@ -35,6 +35,21 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `find_pins_by_name`, `find_pins_by_type`. This is optional: if the server is
   not connected, rely on `find_symbol.py` and `main.py`'s pattern instead — a
   missing MCP server must not stop the loop.
+- **Sourcing / availability (OPTIONAL — only when the user asks for real parts,
+  a BOM, or sourcing, or supplies MPNs).** Check real stock/price:
+  `PYTHONUTF8=1 uv run python tools/check_availability.py "<query>"`. It queries
+  the credentialed DigiKey/JLCPCB APIs only (never fake data) and prints a
+  `skipped: <source> -- no credentials` line for any source without keys.
+  - Record a `### Sourcing` table in the iteration-plan block with columns
+    `| ref | MPN | source | stock | price | note |`.
+  - **Honesty rule:** if a source was skipped (no credentials / network error),
+    write "not checked — no credentials" in the note; **never invent stock or
+    prices.** No creds at all → say sourcing was not verified and move on; this
+    must not block the design.
+  - Attach the chosen part's identity to its component as plain KiCad
+    properties via kwargs — `Component(..., **{"MPN": "2N7000",
+    "Manufacturer": "onsemi", "Distributor": "DigiKey"})`. They round-trip into
+    the schematic (same mechanism as `Sim.*`); no schema change needed.
 
 ## Phase 3 — WRITE
 - Create/modify `circuit-synth/<snake_case_name>.py` following `main.py`'s
