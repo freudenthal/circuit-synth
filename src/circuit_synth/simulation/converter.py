@@ -74,6 +74,11 @@ class SpiceConverter:
         # Model names referenced by diode/BJT/MOSFET devices; a matching .model card
         # is emitted for each that resolves to a built-in generic (see _emit_models).
         self.used_models = set()
+        # Per-device model cards synthesized from Sim.Params overrides, keyed by a
+        # derived name ({base}_{ref}) so two parts overriding the same base model
+        # do not collide. Each value is (device_type, params). Emitted alongside
+        # the built-in generics in _emit_models.
+        self.derived_models = {}
 
     def convert(self, strict: bool = True) -> "SpiceCircuit":
         """Convert circuit-synth circuit to PySpice circuit.
@@ -185,11 +190,73 @@ class SpiceConverter:
             return "mosfet"
         return None
 
+    # KiCad ``Sim.Device`` device tokens -> our SPICE primitive kinds. Lets a
+    # simulation-only stand-in ride on any symbol (the schematic keeps its real
+    # symbol/footprint; only the simulation model is redirected). SUBCKT is left
+    # unmapped here (external-model attach is Stage 9.3).
+    _SIM_DEVICE_KINDS = {
+        "R": "resistor",
+        "C": "capacitor",
+        "L": "inductor",
+        "D": "diode",
+        "NPN": "bjt",
+        "PNP": "bjt",
+        "NMOS": "mosfet",
+        "PMOS": "mosfet",
+        "V": "voltage_source",
+        "I": "current_source",
+    }
+
+    @staticmethod
+    def _sim_props(component) -> dict:
+        """KiCad ``Sim.*`` fields as ``{lowercased suffix: value}`` (empty if none).
+
+        Reads them off ``_extra_fields`` like the waveform params. Accepts both the
+        native dotted spelling (``Sim.Enable``) and an underscore fallback
+        (``Sim_Enable``) in case a flow sanitizes the dot away.
+        """
+        extra = getattr(component, "_extra_fields", None)
+        if not isinstance(extra, dict):
+            return {}
+        out = {}
+        for k, v in extra.items():
+            low = str(k).lower()
+            if low.startswith("sim.") or low.startswith("sim_"):
+                out[low[4:]] = v
+        return out
+
+    def _sim_excluded(self, component) -> bool:
+        """True if ``Sim.Enable`` marks the component out of simulation.
+
+        KiCad uses ``Sim.Enable="0"`` to keep a part on the schematic but exclude
+        it from simulation. Excluded parts are skipped by both conversion and
+        validation (and their pins do not count toward net connectivity).
+        """
+        val = self._sim_props(component).get("enable", None)
+        if val is None:
+            return False
+        return str(val).strip().lower() in ("0", "false", "no", "off")
+
+    def _kind(self, component) -> Optional[str]:
+        """SPICE primitive kind for a component: ``Sim.Device`` wins over the symbol.
+
+        Returns None for an unrecognized ``Sim.Device`` token or an unmapped symbol
+        (validation reports it, naming the offending token/symbol).
+        """
+        device = self._sim_props(component).get("device", None)
+        if device:
+            return self._SIM_DEVICE_KINDS.get(str(device).strip().upper())
+        return self._classify(self._attr(component, "symbol", ""))
+
     def _add_component(self, component):
         """Add a single component to the SPICE circuit."""
         symbol = getattr(component, "symbol", "")
         ref = getattr(component, "ref", "X")
         value = getattr(component, "value", None)
+
+        if self._sim_excluded(component):
+            logger.info(f"{ref}: excluded from simulation (Sim.Enable=0)")
+            return
 
         handlers = {
             "resistor": self._add_resistor,
@@ -202,7 +269,7 @@ class SpiceConverter:
             "bjt": self._add_bjt_transistor,
             "mosfet": self._add_mosfet,
         }
-        handler = handlers.get(self._classify(symbol))
+        handler = handlers.get(self._kind(component))
         if handler is None:
             logger.warning(f"Unknown component type: {symbol} - skipping")
             return
@@ -254,10 +321,13 @@ class SpiceConverter:
         by the symbol's polarity; any other ``value`` is used verbatim as the model
         name (which ``validate`` then checks resolves to a built-in).
         """
-        kind = self._classify(self._attr(component, "symbol", ""))
+        kind = self._kind(component)
         if kind not in ("diode", "bjt", "mosfet"):
             return None
         symbol = str(self._attr(component, "symbol", "")).lower()
+        # A Sim.Device token (NPN/PNP/NMOS/PMOS) sets polarity when the symbol
+        # doesn't (e.g. a sim-only stand-in on a generic symbol).
+        device = str(self._sim_props(component).get("device", "")).strip().lower()
         value = self._attr(component, "value", None)
         v = str(value).strip().lower() if value else ""
         if v in self._TYPE_KEYWORD_MODELS:
@@ -267,11 +337,64 @@ class SpiceConverter:
         if kind == "diode":
             return "DefaultDiode"
         if kind == "bjt":
-            return "DefaultPNP" if "pnp" in symbol else "DefaultNPN"
-        return "DefaultPMOS" if "pmos" in symbol else "DefaultNMOS"
+            return "DefaultPNP" if ("pnp" in symbol or device == "pnp") else "DefaultNPN"
+        return "DefaultPMOS" if ("pmos" in symbol or device == "pmos") else "DefaultNMOS"
+
+    @staticmethod
+    def _parse_sim_params(spec) -> dict:
+        """Parse a KiCad ``Sim.Params`` string (``"bf=200 is=1e-14"``) to ``{K: v}``.
+
+        Keys are upper-cased (ngspice model params are case-insensitive; upper-case
+        matches the built-in generics). Accepts space- or comma-separated pairs.
+        """
+        out = {}
+        if not spec:
+            return out
+        for token in str(spec).replace(",", " ").split():
+            key, sep, val = token.partition("=")
+            if sep and key.strip():
+                out[key.strip().upper()] = val.strip()
+        return out
+
+    @staticmethod
+    def _coerce_param(value):
+        """Coerce a model-param value to float when it looks numeric, else keep it."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+
+    def _resolve_device_model(self, component, ref) -> Optional[str]:
+        """Model name a device instance should reference, applying Sim.Params.
+
+        Without overrides this is just ``_device_model_name`` (registered in
+        ``used_models`` for card emission). With a ``Sim.Params`` override on a
+        built-in base, a per-device derived card (``{base}_{ref}``) is synthesized
+        so the override is local to this device. Returns None for non-semiconductors.
+        """
+        base = self._device_model_name(component)
+        if base is None:
+            return None
+        overrides = self._parse_sim_params(self._sim_props(component).get("params"))
+        if not overrides:
+            self.used_models.add(base)
+            return base
+        spec = self.GENERIC_MODELS.get(base)
+        if spec is None:
+            # Unknown base (validate() will flag it); can't synthesize a card
+            # without a device type, so reference the base verbatim.
+            self.used_models.add(base)
+            return base
+        device_type, params = spec
+        merged = dict(params)
+        for key, val in overrides.items():
+            merged[key] = self._coerce_param(val)
+        derived = f"{base}_{ref}"
+        self.derived_models[derived] = (device_type, merged)
+        return derived
 
     def _emit_models(self):
-        """Emit a ``.model`` card for each referenced built-in generic model.
+        """Emit a ``.model`` card for each referenced built-in and derived model.
 
         Only models actually used by a component are emitted (PySpice would
         otherwise serialize every registered model). Unresolved custom model names
@@ -284,6 +407,10 @@ class SpiceConverter:
             device_type, params = spec
             self.spice_circuit.model(name, device_type, **params)
             logger.debug(f"Emitted .model {name} {device_type}")
+        for name in sorted(self.derived_models):
+            device_type, params = self.derived_models[name]
+            self.spice_circuit.model(name, device_type, **params)
+            logger.debug(f"Emitted derived .model {name} {device_type}")
 
     def _add_diode(self, component, ref: str, value: str):
         """Add diode to SPICE circuit."""
@@ -292,8 +419,7 @@ class SpiceConverter:
             logger.warning(f"Diode {ref} needs 2 connections, got {len(nodes)}")
             return
 
-        model_name = self._device_model_name(component) or "DefaultDiode"
-        self.used_models.add(model_name)
+        model_name = self._resolve_device_model(component, ref) or "DefaultDiode"
         self.spice_circuit.D(ref, nodes[0], nodes[1], model=model_name)
         logger.debug(f"Added diode {ref}: {nodes[0]} -> {nodes[1]} model={model_name}")
 
@@ -370,9 +496,9 @@ class SpiceConverter:
             logger.warning(f"BJT {ref} needs 3 connections (C,B,E), got {len(nodes)}")
             return
 
-        # Determine model (NPN/PNP) from value keyword or symbol polarity.
-        model_name = self._device_model_name(component) or "DefaultNPN"
-        self.used_models.add(model_name)
+        # Determine model (NPN/PNP) from value keyword or symbol polarity, applying
+        # any Sim.Params override.
+        model_name = self._resolve_device_model(component, ref) or "DefaultNPN"
 
         # Add transistor (collector, base, emitter)
         self.spice_circuit.Q(ref, nodes[0], nodes[1], nodes[2], model=model_name)
@@ -389,9 +515,9 @@ class SpiceConverter:
             )
             return
 
-        # Determine model (NMOS/PMOS) from value keyword or symbol polarity.
-        model_name = self._device_model_name(component) or "DefaultNMOS"
-        self.used_models.add(model_name)
+        # Determine model (NMOS/PMOS) from value keyword or symbol polarity, applying
+        # any Sim.Params override.
+        model_name = self._resolve_device_model(component, ref) or "DefaultNMOS"
 
         # Add MOSFET (drain, gate, source, bulk - bulk defaults to source if not provided)
         if len(nodes) >= 4:
@@ -452,13 +578,29 @@ class SpiceConverter:
             f"Added voltage source {ref}: {nodes[0]}(+) -> {nodes[1]}(-) = {spec}"
         )
 
-    @staticmethod
-    def _source_params(component) -> dict:
-        """Lowercased extra-field map for waveform params (empty if none)."""
+    def _source_params(self, component) -> dict:
+        """Lowercased waveform-param map for a source (empty if none).
+
+        Merges KiCad ``Sim.Params`` (as a base) with the component's own extra
+        fields, where an explicit extra field wins over a ``Sim.Params`` value.
+        The ``Sim.*`` fields themselves are dropped so they don't masquerade as
+        waveform params.
+        """
         extra = getattr(component, "_extra_fields", None)
         if not isinstance(extra, dict):
             return {}
-        return {str(k).lower(): v for k, v in extra.items()}
+        merged = {
+            k.lower(): v
+            for k, v in self._parse_sim_params(
+                self._sim_props(component).get("params")
+            ).items()
+        }
+        for k, v in extra.items():
+            low = str(k).lower()
+            if low.startswith("sim.") or low.startswith("sim_"):
+                continue
+            merged[low] = v
+        return merged
 
     @staticmethod
     def _wave_num(value, default: str) -> str:
@@ -843,11 +985,38 @@ class SpiceConverter:
             1 for pin in pin_map.values() if getattr(pin, "net", None) is not None
         )
 
+    def _net_live_pin_count(self, net, excluded_refs) -> Optional[int]:
+        """Pins on a net whose owning component isn't excluded, or None if unknown.
+
+        A ``Sim.Enable=0`` part's pins don't hold a net up, so a net left with
+        fewer than two *live* pins is still floating.
+        """
+        pins = getattr(net, "pins", None)
+        if pins is None:
+            return None
+        try:
+            count = 0
+            for pin in pins:
+                comp = getattr(pin, "_component", None)
+                cref = getattr(comp, "ref", None)
+                if cref is not None and cref in excluded_refs:
+                    continue
+                count += 1
+            return count
+        except TypeError:
+            return None
+
     def _all_driven_net_names(self) -> set:
-        """Nets that will carry a source: explicit source components + heuristic rails."""
+        """Nets that will carry a source: explicit source components + heuristic rails.
+
+        An excluded (``Sim.Enable=0``) source doesn't drive anything, so it isn't
+        counted as excitation.
+        """
         driven = set()
         for component in self._iter_components():
-            if self._classify(self._attr(component, "symbol", "")) in (
+            if self._sim_excluded(component):
+                continue
+            if self._kind(component) in (
                 "voltage_source",
                 "current_source",
             ):
@@ -876,15 +1045,31 @@ class SpiceConverter:
         """
         problems = []
 
-        # 1. Every component must map to a known SPICE primitive.
+        # Parts opted out via Sim.Enable=0 are ignored by every check below and
+        # don't count toward net connectivity.
+        excluded_refs = set()
         for component in self._iter_components():
+            if self._sim_excluded(component):
+                excluded_refs.add(self._attr(component, "ref", None) or "?")
+
+        # 1. Every component must map to a known SPICE primitive (Sim.Device wins).
+        for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
             symbol = self._attr(component, "symbol", "")
             ref = self._attr(component, "ref", None) or "?"
-            if self._classify(symbol) is None:
-                problems.append(
-                    f"{ref}: unrecognized symbol '{symbol}' has no SPICE mapping "
-                    f"(would be silently skipped)"
-                )
+            if self._kind(component) is None:
+                device = self._sim_props(component).get("device", None)
+                if device:
+                    problems.append(
+                        f"{ref}: Sim.Device '{device}' is not a supported device "
+                        f"(known: {', '.join(sorted(self._SIM_DEVICE_KINDS))})"
+                    )
+                else:
+                    problems.append(
+                        f"{ref}: unrecognized symbol '{symbol}' has no SPICE mapping "
+                        f"(would be silently skipped)"
+                    )
 
         driven = self._all_driven_net_names()
 
@@ -901,7 +1086,11 @@ class SpiceConverter:
             name = self._attr(net, "name", None) or str(net)
             if self._is_ground_name(name) or name in driven:
                 continue
-            count = self._net_pin_count(net)
+            count = (
+                self._net_live_pin_count(net, excluded_refs)
+                if excluded_refs
+                else self._net_pin_count(net)
+            )
             if count is None:
                 continue  # can't tell (dict/JSON net) -> don't block
             if count < 2:
@@ -912,7 +1101,9 @@ class SpiceConverter:
 
         # 4. Op-amps need at least their three signal pins connected.
         for component in self._iter_components():
-            if self._classify(self._attr(component, "symbol", "")) != "opamp":
+            if self._sim_excluded(component):
+                continue
+            if self._kind(component) != "opamp":
                 continue
             count = self._connected_pin_count(component)
             if count is None:
@@ -927,6 +1118,8 @@ class SpiceConverter:
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
         #    built-in generic (otherwise ngspice errors on an undefined model).
         for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
             model = self._device_model_name(component)
             if model is None:
                 continue

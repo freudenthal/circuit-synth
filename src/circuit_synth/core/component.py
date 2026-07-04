@@ -350,7 +350,12 @@ class Component(SimplifiedPinAccess):
             raise ValidationError("start with a digit")
         if keyword.iskeyword(name):
             raise ValidationError("reserved keyword")
-        if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", name):
+        # Dots are permitted after the first character so KiCad's native,
+        # dotted property names (e.g. "Sim.Enable", "Sim.Device") round-trip
+        # verbatim. Such names are only reachable via getattr()/_extra_fields,
+        # never plain attribute access, which is exactly how the SPICE converter
+        # reads them.
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_.]*$", name):
             raise ValidationError("invalid characters")
         if isinstance(value, str) and not value.strip():
             raise ValidationError("cannot be empty")
