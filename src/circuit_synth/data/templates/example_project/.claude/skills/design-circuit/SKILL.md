@@ -60,12 +60,25 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 | Gerber/PCB errors | Ignore — unavailable feature; ensure `generate_pcb=False` |
 
 ## Phase 5 — SIMULATE
-- Follow the working pattern in `tools/simulate_example.py` to run an operating-
-  point analysis of your circuit and capture node voltages for every net named
-  in the acceptance criteria. The pattern is: build the `@circuit` function,
-  then `sim = circuit.simulate()`, `result = sim.operating_point()`, and read
-  values with `result.get_voltage("NET_NAME")` (ngspice node lookup is
-  case-insensitive, so `"VOUT_3V3"` and `"vout_3v3"` both work).
+- **DC / operating point:** follow the working pattern in
+  `tools/simulate_example.py` to run an operating-point analysis of your circuit
+  and capture node voltages for every net named in the acceptance criteria. The
+  pattern is: build the `@circuit` function, then `sim = circuit.simulate()`,
+  `result = sim.operating_point()`, and read values with
+  `result.get_voltage("NET_NAME")` (ngspice node lookup is case-insensitive, so
+  `"VOUT_3V3"` and `"vout_3v3"` both work).
+- **AC / frequency response:** follow `tools/simulate_filter.py`. Drive the input
+  with a `Simulation_SPICE:VSIN` source (it carries an AC magnitude of 1 V, so the
+  output node *is* the transfer function), then
+  `result = sim.ac_analysis(start_hz, stop_hz, points)` and measure with
+  `result.cutoff_frequency("NET")` (−3 dB corner), `result.passband_gain_db("NET")`,
+  and `result.bode("NET")` → `(freq, magnitude_db, phase_deg)`. Roll-off is best
+  measured on the asymptote (e.g. 10·fc → 100·fc), not fc → 10·fc (fc sits on the
+  −3 dB knee).
+- **Declaring sources:** use KiCad's real `Simulation_SPICE` symbols — `VDC` for a
+  DC supply, `VSIN` for AC/transient stimulus. Pin 1 is `+`, pin 2 is `-`. Do NOT
+  use `Device:V`/`Device:I` (not real KiCad symbols). An explicit source overrides
+  the net-name rail heuristic on the nets it drives.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install is needed.
 - If simulation errors out or the backend is unavailable (the helper prints

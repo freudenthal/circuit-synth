@@ -225,11 +225,19 @@ This project ships Claude Code helpers for circuit design:
   and refine it (`.claude/skills/design-circuit/`).
 - **`tools/find_symbol.py`** — look up exact KiCad symbol/footprint ids:
   `uv run python tools/find_symbol.py <query> [--footprints]`.
-- **`tools/simulate_example.py`** — known-good SPICE reference: runs a DC
+- **`tools/simulate_example.py`** — known-good DC SPICE reference: runs a DC
   operating-point analysis via ngspice (auto-uses KiCad's bundled `ngspice.dll`
   on Windows). Copy its pattern to verify your own circuit's node voltages.
+- **`tools/simulate_filter.py`** — known-good AC-sweep reference: an op-amp
+  low-pass filter driven by a `Simulation_SPICE:VSIN` source (AC magnitude 1 V);
+  prints passband gain, -3 dB cutoff, and roll-off via
+  `circuit.simulate().ac_analysis(...)` and the `cutoff_frequency`/`bode` helpers.
 - **kicad-sch-api MCP server** (optional) — enable with
   `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
+
+Declare simulation sources with KiCad's real `Simulation_SPICE` symbols —
+`Simulation_SPICE:VDC` for a DC supply, `Simulation_SPICE:VSIN` for an AC/transient
+stimulus (NOT the fictitious `Device:V`). Pin 1 is `+`, pin 2 is `-`.
 
 """
 
@@ -301,8 +309,17 @@ This project ships these Claude Code helpers:
 - **`tools/simulate_example.py`** — known-good SPICE reference (DC operating
   point via ngspice; auto-uses KiCad's bundled `ngspice.dll` on Windows). Copy
   its pattern to verify node voltages: `circuit.simulate().operating_point()`.
+- **`tools/simulate_filter.py`** — known-good AC-sweep reference (op-amp low-pass
+  filter). Copy its pattern for frequency-domain checks:
+  `circuit.simulate().ac_analysis(start_hz, stop_hz, points)` then
+  `.cutoff_frequency("NET")` / `.passband_gain_db("NET")` / `.bode("NET")`.
 - **kicad-sch-api MCP server** (optional) — direct schematic tools; enable with
   `uv add mcp-kicad-sch-api` (config in `.mcp.json`).
+
+Declare simulation sources with real `Simulation_SPICE` symbols:
+`Simulation_SPICE:VDC` (DC supply) or `Simulation_SPICE:VSIN` (AC/transient
+stimulus, carries AC magnitude 1 V) — NOT the fictitious `Device:V`. Pin 1 = `+`,
+pin 2 = `-`.
 
 """
 
