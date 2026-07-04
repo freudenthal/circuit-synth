@@ -227,22 +227,71 @@ class SpiceConverter:
         self.spice_circuit.D(ref, nodes[0], nodes[1], model=model_name)
         logger.debug(f"Added diode {ref}: {nodes[0]} -> {nodes[1]} model={model_name}")
 
-    def _add_opamp(self, component, ref: str, value: str):
-        """Add op-amp to SPICE circuit (simplified model)."""
-        nodes = self._get_component_nodes(component)
-        if len(nodes) < 3:
-            logger.warning(
-                f"Op-amp {ref} needs at least 3 connections, got {len(nodes)}"
-            )
-            return
+    # Ideal op-amp open-loop gain. Large enough that closed-loop behaviour is set
+    # by the feedback network, frequency-independent (infinite GBW) so an active
+    # filter's response is the RC network alone.
+    OPAMP_OPEN_LOOP_GAIN = 1e6
 
-        # Simplified op-amp as voltage-controlled voltage source
-        # Assumes nodes[0] = out, nodes[1] = in+, nodes[2] = in-
-        gain = 100000  # High gain approximation
+    def _opamp_terminals(self, component):
+        """Resolve an op-amp's (out, in+, in-) SPICE nodes by pin function/name.
+
+        Op-amp pins must be mapped semantically, not by position: KiCad pinouts
+        vary (an LM358 unit is out=1, in-=2, in+=3), so pin-number order would
+        swap the inputs. Uses the live pin map and considers only *connected*
+        pins, so the unused unit of a dual op-amp (pins with no net) is skipped.
+        Power pins (V+/V-) are not needed by the ideal model. Returns
+        (out, in_plus, in_minus) spice nodes, or None if a signal terminal is
+        missing or no live pin map is available.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        out = in_plus = in_minus = None
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue  # unconnected (e.g. the unused unit of a dual op-amp)
+            func = str(getattr(pin, "func", "")).lower()
+            name = (getattr(pin, "name", "") or "").strip()
+            node = self.node_map.get(net.name, net.name)
+            if "output" in func:
+                out = node
+            elif name == "+":
+                in_plus = node
+            elif name == "-":
+                in_minus = node
+        if out is None or in_plus is None or in_minus is None:
+            return None
+        return out, in_plus, in_minus
+
+    def _add_opamp(self, component, ref: str, value: str):
+        """Add an op-amp as an ideal VCVS: Vout = Aol * (V(in+) - V(in-)).
+
+        Terminals are resolved by pin function/name so the model is correct
+        regardless of the symbol's pin numbering. Falls back to a positional guess
+        only when no live pin map is available (dict/JSON-shaped circuits).
+        """
+        terminals = self._opamp_terminals(component)
+        if terminals is None:
+            nodes = self._get_component_nodes(component)
+            if len(nodes) < 3:
+                logger.warning(
+                    f"Op-amp {ref} needs at least 3 connections, got {len(nodes)}"
+                )
+                return
+            # Legacy positional fallback: [out, in+, in-].
+            out, in_plus, in_minus = nodes[0], nodes[1], nodes[2]
+        else:
+            out, in_plus, in_minus = terminals
+
+        gain = self.OPAMP_OPEN_LOOP_GAIN
         self.spice_circuit.VCVS(
-            ref, nodes[0], self.spice_circuit.gnd, nodes[1], nodes[2], gain
+            ref, out, self.spice_circuit.gnd, in_plus, in_minus, gain
         )
-        logger.debug(f"Added op-amp {ref} with gain {gain}")
+        logger.debug(
+            f"Added op-amp {ref} (ideal VCVS, gain={gain}): "
+            f"out={out}, in+={in_plus}, in-={in_minus}"
+        )
 
     def _add_bjt_transistor(self, component, ref: str, value: str):
         """Add BJT transistor to SPICE circuit."""
