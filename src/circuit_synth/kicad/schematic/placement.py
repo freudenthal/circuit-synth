@@ -727,21 +727,54 @@ class PlacementEngine:
                 )
             )
 
-        # Add sheet bounds if sheets exist
-        if hasattr(self.schematic, "sheets"):
-            for sheet in self.schematic.sheets:
-                # Sheets store their position as top-left corner
-                bounds.append(
-                    ElementBounds(
-                        sheet.position.x,
-                        sheet.position.y,
-                        sheet.size[0],
-                        sheet.size[1],
-                        "sheet",
-                    )
-                )
+        # Add sheet bounds if sheets exist. Sheet bounds only steer where new
+        # components auto-place (overlap avoidance); they never affect
+        # correctness, so this stays best-effort and must never raise.
+        for sx, sy, sw, sh in self._iter_sheet_bounds():
+            bounds.append(ElementBounds(sx, sy, sw, sh, "sheet"))
 
         return bounds
+
+    def _iter_sheet_bounds(self):
+        """Yield (x, y, width, height) for each hierarchical sheet.
+
+        Tolerates both shapes of ``schematic.sheets`` seen across KiCad
+        versions: an iterable of sheet objects (older kicad-sch-api / the
+        internal Schematic, exposing ``.position``/``.size``) and KiCad-10
+        kicad-sch-api's non-iterable ``SheetManager`` (which keeps sheets as
+        dicts under ``_data['sheets']``).
+        """
+        sheets = getattr(self.schematic, "sheets", None)
+        if sheets is None:
+            return
+
+        if hasattr(sheets, "__iter__"):
+            items = list(sheets)
+        else:
+            # KiCad-10 SheetManager: no public list accessor, read the backing
+            # sheet dicts. Guarded so a future API shift degrades to "no sheet
+            # bounds" rather than crashing the whole update.
+            data = getattr(sheets, "_data", None)
+            items = data.get("sheets", []) if isinstance(data, dict) else []
+
+        for sheet in items:
+            pos = getattr(sheet, "position", None)
+            size = getattr(sheet, "size", None)
+            if pos is not None and size is not None:
+                try:
+                    yield pos.x, pos.y, size[0], size[1]
+                    continue
+                except (AttributeError, TypeError, IndexError):
+                    pass
+            if isinstance(sheet, dict):
+                p = sheet.get("position", {}) or {}
+                s = sheet.get("size", {}) or {}
+                yield (
+                    p.get("x", 0.0),
+                    p.get("y", 0.0),
+                    s.get("width", 0.0),
+                    s.get("height", 0.0),
+                )
 
     def _snap_to_grid(self, position: Tuple[float, float]) -> Tuple[float, float]:
         """

@@ -1210,10 +1210,11 @@ class APISynchronizer:
             # Issue #489: Also reconcile pin connections for newly added components
             # This ensures hierarchical labels and power symbols are added for the new component's pins
             kicad_ref = comp_data["reference"]
-            if kicad_ref in self.schematic.components_dict:
+            added_component = self.schematic.components.get(kicad_ref)
+            if added_component is not None:
                 logger.debug(f"    Reconciling pins for newly added component {kicad_ref}")
                 # Update kicad_components dict with newly added component
-                kicad_components[kicad_ref] = self.schematic.components_dict[kicad_ref]
+                kicad_components[kicad_ref] = added_component
                 self._reconcile_component_pins(
                     circuit_id, kicad_ref, circuit_components, kicad_components, report
                 )
@@ -1251,16 +1252,52 @@ class APISynchronizer:
         # Determine library ID from component type
         lib_id = self._determine_library_id(comp_data)
 
-        component = self.component_manager.add_component(
-            library_id=lib_id,
-            reference=comp_data["reference"],
-            value=comp_data["value"],
-            footprint=comp_data.get("footprint"),
-            placement_strategy="edge_right",  # Place new components on right edge
-        )
+        components_api = getattr(self.schematic, "components", None)
+        native_add = getattr(components_api, "add", None)
+        if callable(native_add) and hasattr(self.schematic, "_data"):
+            # KiCad-10 kicad-sch-api: add through the native collection so the
+            # new component lands in ComponentCollection._items and is written
+            # out by save() (which rebuilds _data from the collections). Going
+            # through ComponentManager here only touches _data['symbol'], which
+            # that rebuild discards, so the added component would silently vanish.
+            component = native_add(
+                lib_id=lib_id,
+                reference=comp_data["reference"],
+                value=comp_data.get("value") or "",
+                position=self._next_edge_right_position(),
+                footprint=comp_data.get("footprint"),
+            )
+        else:
+            component = self.component_manager.add_component(
+                library_id=lib_id,
+                reference=comp_data["reference"],
+                value=comp_data["value"],
+                footprint=comp_data.get("footprint"),
+                placement_strategy="edge_right",  # Place new components on right edge
+            )
 
         if component:
             report.added.append(comp_data["id"])
+
+    def _next_edge_right_position(self, spacing: float = 25.4):
+        """Pick a spot to the right of existing components for a new part.
+
+        A deliberately simple placement: new components land in a free column to
+        the right of everything already placed, so they never overlap existing
+        (possibly hand-placed) parts. The user repositions as desired in KiCad.
+        """
+        xs, ys = [], []
+        try:
+            for comp in self.schematic.components:
+                pos = getattr(comp, "position", None)
+                if pos is not None:
+                    xs.append(pos.x)
+                    ys.append(pos.y)
+        except Exception:
+            pass
+        if xs:
+            return (max(xs) + spacing, min(ys))
+        return (50.8, 50.8)
 
     def _determine_library_id(self, comp_data: Dict) -> str:
         """Determine KiCad library ID from component data."""
