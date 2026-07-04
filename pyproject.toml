@@ -77,6 +77,14 @@ claude = [
     # Claude Code SDK integration for AI-powered circuit design
     "claude-code-sdk>=0.0.17",
 ]
+skidl = [
+    # Optional SKiDL render backend (Stage 13): pretty wire-routed schematics.
+    # circuit_synth never imports skidl in-process -- the render runs in a
+    # separate interpreter via subprocess -- so this is only needed in the
+    # interpreter that does the rendering. May instead be an editable install
+    # of the local skidl fork; see workingdocs/plans/stage-13-skidl-render-adapter.md.
+    "skidl>=2.2.3",
+]
 fast_generation = [
     # Fast generation with Google ADK (optional)
     "google-adk>=0.1.0",
@@ -235,6 +243,7 @@ markers = [
     "functional: marks tests as functional tests",
     "cache: marks tests as cache-related tests",
     "requires_pcb: needs the optional kicad_pcb_api PCB backend (skipped if absent)",
+    "requires_skidl: needs a skidl-capable interpreter for the SKiDL render backend (Stage 13; skipped if CIRCUIT_SYNTH_SKIDL_PYTHON / .venv-skidl absent)",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
