@@ -1242,6 +1242,28 @@ class SchematicWriter:
                 power_comp.on_board = True
                 power_comp.dnp = False
 
+                # Instance path must include the root schematic UUID (or the full
+                # hierarchical path), exactly like regular components get in
+                # _add_components. Power symbols are created on this separate code
+                # path, which skips that fix-up, so without this they keep
+                # kicad-sch-api's default instance of (path "/"). A bare "/" is a
+                # dangling hierarchy reference: KiCad LOADS it fine (and kicad-cli
+                # netlist/erc tolerate it) but its schematic writer / connectivity
+                # null-dereferences it on SAVE -> segfault and a truncated, corrupted
+                # file. Reproduces headlessly with `kicad-cli sch upgrade`.
+                if self.hierarchical_path and len(self.hierarchical_path) > 0:
+                    power_instance_path = "/" + "/".join(self.hierarchical_path)
+                else:
+                    power_instance_path = f"/{self.schematic.uuid}"
+                power_comp.instances.clear()
+                power_comp.instances.append(
+                    SymbolInstance(
+                        path=power_instance_path,
+                        reference=reference,
+                        unit=1,
+                    )
+                )
+
                 # Fix Value property position - kicad-sch-api places it incorrectly
                 # The Value should be positioned based on symbol rotation:
                 # - 0° (up): Value above symbol
