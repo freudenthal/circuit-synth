@@ -74,6 +74,15 @@ def test_cross_sheet_net_excluded_when_pin_unresolved():
     assert _eligible_nets(sch, named, DEFAULT_MAX_WIRE_DIST_MM) == []
 
 
+def test_coincident_pins_excluded():
+    # Two pins at the SAME point (e.g. a multi-pad sensor's redundant/stacked pads
+    # sharing a net, like the SiPM's TSV pins) must NOT be wired: a zero-length wire
+    # crashes KiCad on save. dist == 0 -> skip.
+    sch = _FakeSch({("D1", "C6"): Pt(73.66, 35.56), ("D1", "D6"): Pt(73.66, 35.56)})
+    named = {"FAST": {("D1", "C6"), ("D1", "D6")}}
+    assert _eligible_nets(sch, named, DEFAULT_MAX_WIRE_DIST_MM) == []
+
+
 def test_threshold_boundary_inclusive():
     sch = _FakeSch(
         {("R1", "2"): Pt(0, 0), ("R2", "1"): Pt(0, DEFAULT_MAX_WIRE_DIST_MM)}

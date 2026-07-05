@@ -186,7 +186,14 @@ def _eligible_nets(
         pos2 = sch.get_component_pin_position(r2, p2)
         if pos1 is None or pos2 is None:  # a pin on another sheet -> not local
             continue
-        if _manhattan(pos1, pos2) > max_wire_dist_mm:
+        dist = _manhattan(pos1, pos2)
+        if dist > max_wire_dist_mm:
+            continue
+        # Two pins at the SAME point (e.g. a multi-pad sensor's redundant/stacked
+        # pads sharing a net, like the SiPM's TSV pins) would produce a zero-length
+        # wire, which KiCad loads but crashes on when saving. They are already
+        # electrically coincident, so no wire is needed -- skip them.
+        if dist == 0:
             continue
         out.append((r1, p1, r2, p2))
     return out
