@@ -615,8 +615,8 @@ class Circuit:
         generate_ratsnest: bool = True,
         update_source_refs: Optional[bool] = None,
         preserve_user_components: bool = False,
-        erc_gate: bool = False,
-        selective_wires: bool = False,
+        erc_gate: bool = True,
+        selective_wires: bool = True,
     ) -> Dict[str, Any]:
         """
         Generate a complete KiCad project (schematic + PCB) from this circuit.
@@ -641,14 +641,17 @@ class Circuit:
                                      True: Preserve all components in KiCad, even if not in Python
             erc_gate: Run KiCad headless ERC on the generated root schematic and
                      auto-fix `power_pin_not_driven` (add PWR_FLAG), iterating up to
-                     3 times (default: False). Residual violations are returned in
-                     `result["erc_report"]`. If kicad-cli is unavailable this is a
-                     warning, not a failure.
+                     3 times (default: True as of Stage 18 — the autofix is net-aware
+                     and reverts any iteration that makes ERC worse). Residual
+                     violations are returned in `result["erc_report"]`. If kicad-cli
+                     is unavailable this is a warning, not a failure. Pass False to
+                     skip the ERC pass entirely.
             selective_wires: Draw real wires for simple 2-pin, short, same-sheet,
                      non-power local nets (instead of leaving them as labels only) as
-                     a post-generation readability pass (default: False). Guarded by a
+                     a post-generation readability pass (default: True). Guarded by a
                      netlist-equivalence check that reverts if a wire would change
-                     connectivity. Summary on `result["selective_wires"]`.
+                     connectivity, so it can only ever add cosmetic wires. Summary on
+                     `result["selective_wires"]`. Pass False to skip it.
 
         Returns:
             dict: Result dictionary containing:

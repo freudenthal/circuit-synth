@@ -229,8 +229,13 @@ def _generate_divider(tmpdir):
     cwd = os.getcwd()
     os.chdir(tmpdir)
     try:
+        # erc_gate/selective_wires default to True (Stage-14 flip); this fixture must
+        # control its own starting state, so opt out and drive the autofix by hand.
         _flg_divider().generate_kicad_project(
-            project_name="flgdiv", generate_pcb=False
+            project_name="flgdiv",
+            generate_pcb=False,
+            erc_gate=False,
+            selective_wires=False,
         )
     finally:
         os.chdir(cwd)

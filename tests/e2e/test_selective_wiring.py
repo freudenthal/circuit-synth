@@ -66,7 +66,14 @@ def _generate(tmp_path: Path) -> Path:
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        _divider().generate_kicad_project(project_name="wirediv", generate_pcb=False)
+        # Defaults flipped on (Stage-14): opt out so this test owns the labels-only
+        # baseline and drives wire_local_nets by hand.
+        _divider().generate_kicad_project(
+            project_name="wirediv",
+            generate_pcb=False,
+            erc_gate=False,
+            selective_wires=False,
+        )
     finally:
         os.chdir(cwd)
     return next(tmp_path.rglob("WireDiv.kicad_sch"))
@@ -103,7 +110,10 @@ def test_generate_kicad_project_selective_wires_flag(tmp_path):
     os.chdir(tmp_path)
     try:
         result = _divider().generate_kicad_project(
-            project_name="wireflag", generate_pcb=False, selective_wires=True
+            project_name="wireflag",
+            generate_pcb=False,
+            selective_wires=True,
+            erc_gate=False,
         )
     finally:
         os.chdir(cwd)

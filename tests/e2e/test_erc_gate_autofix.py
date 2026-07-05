@@ -34,7 +34,14 @@ def _generate(tmp_path: Path) -> Path:
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        _divider().generate_kicad_project(project_name="ercgatediv", generate_pcb=False)
+        # Defaults flipped on (Stage-14): opt out so the gate runs only when the
+        # test drives it, and "before" ERC still shows the unfixed violation.
+        _divider().generate_kicad_project(
+            project_name="ercgatediv",
+            generate_pcb=False,
+            erc_gate=False,
+            selective_wires=False,
+        )
     finally:
         os.chdir(cwd)
     return next(tmp_path.rglob("ErcGateDiv.kicad_sch"))
@@ -69,7 +76,10 @@ def test_generate_kicad_project_erc_gate_flag(tmp_path):
     os.chdir(tmp_path)
     try:
         result = _divider().generate_kicad_project(
-            project_name="ercflag", generate_pcb=False, erc_gate=True
+            project_name="ercflag",
+            generate_pcb=False,
+            erc_gate=True,
+            selective_wires=False,
         )
     finally:
         os.chdir(cwd)
@@ -100,7 +110,12 @@ def test_erc_gate_two_rails_unique_flags_runs_to_completion(tmp_path):
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        _two_rail().generate_kicad_project(project_name="tworail", generate_pcb=False)
+        _two_rail().generate_kicad_project(
+            project_name="tworail",
+            generate_pcb=False,
+            erc_gate=False,
+            selective_wires=False,
+        )
     finally:
         os.chdir(cwd)
     sch = next(tmp_path.rglob("TwoRail.kicad_sch"))
@@ -169,7 +184,10 @@ def test_erc_gate_clears_opamp_power_rails(tmp_path):
     os.chdir(tmp_path)
     try:
         _opamp_rails().generate_kicad_project(
-            project_name="opamprails", generate_pcb=False
+            project_name="opamprails",
+            generate_pcb=False,
+            erc_gate=False,
+            selective_wires=False,
         )
     finally:
         os.chdir(cwd)

@@ -127,11 +127,13 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `PYTHONUTF8=1 "C:\Program Files\KiCad\10.0\bin\kicad-cli.exe" sch erc
   --format json --severity-all --output erc.json <project>/<name>.kicad_sch`
   (netlist/ERC on the **root** sheet covers subsheets too).
-- To auto-repair the common `power_pin_not_driven` case (a power symbol with no
-  driver → add a `PWR_FLAG`), enable the generator's ERC gate: pass
-  `erc_gate=True` to the generation call in your Phase-3 file. It iterates ERC +
-  PWR_FLAG fixes and returns the residual report on the result
-  (`result["erc_report"].summary()`).
+- The generator's ERC gate runs **by default** (`erc_gate=True`): it iterates ERC +
+  net-aware `PWR_FLAG` fixes for the common `power_pin_not_driven` case (a power pin
+  with no driver — including a real part's power rails) and returns the residual
+  report on the result (`result["erc_report"].summary()`). Pass `erc_gate=False` to
+  skip it (e.g. when kicad-cli is absent and you want a faster run). Simple 2-pin
+  local nets are also drawn as real wires by default (`selective_wires=True`), guarded
+  by a netlist-equivalence check that reverts if a wire would change connectivity.
 - Paste the ERC summary into `design_log.md`. Treat remaining **errors** as
   FAIL → route back to Phase 3 (fix the connection). **Warnings** like
   `isolated_pin_label` on an I/O net terminated by a single label are normal —
