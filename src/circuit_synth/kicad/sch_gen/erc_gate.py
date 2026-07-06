@@ -71,6 +71,7 @@ class ErcViolation:
     severity: str
     description: str
     sheet: str = "/"
+    uuid_path: str = "/"
     items: List[ErcItem] = field(default_factory=list)
 
     @property
@@ -158,6 +159,7 @@ def _parse_erc_json(data: dict, schematic_path: str) -> ErcReport:
     violations: List[ErcViolation] = []
     for sheet in data.get("sheets", []):
         sheet_path = sheet.get("path", "/")
+        sheet_uuid_path = sheet.get("uuid_path", "/")
         for v in sheet.get("violations", []):
             items = []
             for it in v.get("items", []):
@@ -176,6 +178,7 @@ def _parse_erc_json(data: dict, schematic_path: str) -> ErcReport:
                     severity=v.get("severity", "warning"),
                     description=v.get("description", ""),
                     sheet=sheet_path,
+                    uuid_path=sheet_uuid_path,
                     items=items,
                 )
             )
@@ -276,6 +279,38 @@ def classify(violation: ErcViolation) -> str:
     return "autofix" if violation.type in AUTOFIX_TYPES else "report"
 
 
+# A top-level (sheet ...) block: everything up to the first line that is exactly
+# one tab + ")" (the sheet's own close; inner closes are more deeply indented).
+_SHEET_BLOCK_RE = re.compile(r"\(sheet\b.*?\n\t\)", re.DOTALL)
+
+
+def _map_sheet_uuids_to_files(root_path: str) -> Dict[str, str]:
+    """Map each sheet-symbol UUID to the child ``.kicad_sch`` file it instantiates.
+
+    KiCad's ERC JSON identifies the sheet a violation sits in by ``uuid_path`` =
+    ``/<root_uuid>/<sheet_symbol_uuid>[/...]``; the last UUID is the sheet symbol.
+    Every ``(sheet ...)`` block (in any schematic in the project dir) carries that
+    UUID plus a ``"Sheetfile"`` property, so scanning them lets us resolve a
+    violation to the exact subsheet file -- robust to the ``#PWR`` reference
+    collisions that make the ref alone ambiguous across sheets. Best-effort: a
+    parse miss just leaves that UUID unmapped (caller falls back to the root).
+    """
+    result: Dict[str, str] = {}
+    root = Path(root_path)
+    for sch_file in root.parent.glob("*.kicad_sch"):
+        try:
+            text = sch_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for m in _SHEET_BLOCK_RE.finditer(text):
+            block = m.group(0)
+            um = re.search(r'\(uuid\s+"?([0-9a-fA-F-]+)"?\)', block)
+            fm = re.search(r'"Sheetfile"\s+"([^"]+)"', block)
+            if um and fm:
+                result[um.group(1)] = str((sch_file.parent / fm.group(1)).resolve())
+    return result
+
+
 _FLG_RE = re.compile(r"#FLG0*(\d+)$")
 
 
@@ -311,6 +346,15 @@ def _apply_power_flag_autofixes(
     and always wired to pin "1", which only held for power symbols, so a real-part
     rail (value == part number, pin "1" a signal pin) could never clear.
 
+    **Sheet-aware (multi-sheet designs).** A hierarchical design's ``#PWR`` symbols
+    live in the *child* sheet files (the root sheet may have none), and their refs
+    even collide across sheets (two ``#PWR001``). So each violation is routed to the
+    subsheet it sits in -- via its ``uuid_path`` (last UUID = sheet symbol) mapped to
+    the ``.kicad_sch`` file -- and its ``#PWR`` value/pin position are read from
+    THAT file, where the flag + wire are placed and saved. Power nets are global, so
+    one flag per net (in whichever sheet its anchor lives) drives it everywhere. On a
+    flat design every violation routes to the root file, so behaviour is unchanged.
+
     One flag per undriven net, wired to that net's deterministic anchor pin. Dangling
     nets (``unconnected-*``) are skipped -- a flag there would mask a real error. The
     canonical flag point (anchor pin + 5.08 mm) being already occupied is the
@@ -322,18 +366,16 @@ def _apply_power_flag_autofixes(
     Returns the number of flags added; returns 0 (and logs) if kicad-sch-api is
     unavailable or nothing is actionable.
     """
-    # Every flagged (ref, pin), plus its ERC-item position (a placement fallback for
-    # when the pin position cannot be resolved from the schematic).
-    undriven: List[Tuple[str, str]] = []
-    item_pos: Dict[Tuple[str, str], Tuple[Optional[float], Optional[float]]] = {}
+    # Every flagged (ref, pin), tagged with the sheet uuid_path it was reported in
+    # and its ERC-item position (a placement fallback when the pin position cannot be
+    # resolved from the schematic).
+    undriven: List[Tuple[str, str, str, Tuple[Optional[float], Optional[float]]]] = []
     for v in report.violations:
         if classify(v) != "autofix":
             continue
         for it in v.items:
             if it.reference and it.pin:
-                rp = (it.reference, it.pin)
-                undriven.append(rp)
-                item_pos.setdefault(rp, (it.x, it.y))
+                undriven.append((it.reference, it.pin, v.uuid_path, (it.x, it.y)))
     if not undriven:
         return 0
 
@@ -343,35 +385,67 @@ def _apply_power_flag_autofixes(
         logger.warning("kicad-sch-api unavailable; cannot apply ERC autofix: %s", e)
         return 0
 
-    sch = ksa.load_schematic(schematic_path)
+    root_path = str(Path(schematic_path).resolve())
+    sheet_files = _map_sheet_uuids_to_files(schematic_path)
 
-    # Seed the flag index past any #FLG refs already present so a second pass (across
-    # erc_gate() iterations) does not re-emit #FLG01 and collide (stage 17.2).
-    by_ref = {str(c.reference): c for c in sch.components}
-    flag_index = _next_flag_index(by_ref)
+    def _target_file(uuid_path: str) -> str:
+        # The last UUID in the path is the sheet symbol; a root-sheet violation
+        # (path == '/<root_uuid>') has no child sheet UUID -> the root file.
+        if uuid_path:
+            last = uuid_path.rstrip("/").rsplit("/", 1)[-1]
+            if last in sheet_files:
+                return sheet_files[last]
+        return root_path
 
     def _pt_key(x, y):
         return (round(float(x), 2), round(float(y), 2))
 
-    # Points already occupied by a PWR_FLAG (from a prior iteration) -- never stack.
-    occupied = {
-        _pt_key(c.position.x, c.position.y)
-        for c in sch.components
-        if str(c.reference).startswith("#FLG") and getattr(c, "position", None)
-    }
+    # Lazy per-file loaded schematic + its ref map + occupied #FLG points. Positions
+    # are per-sheet, so occupied must be per-file too.
+    loaded: Dict[str, dict] = {}
 
-    def _net_of(ref: str, pin: str) -> Optional[str]:
-        # Power pseudo-symbols are excluded from the netlist -> use their value.
+    def _load(file: str) -> dict:
+        if file not in loaded:
+            sch = ksa.load_schematic(file)
+            by_ref = {str(c.reference): c for c in sch.components}
+            occupied = {
+                _pt_key(c.position.x, c.position.y)
+                for c in sch.components
+                if str(c.reference).startswith("#FLG") and getattr(c, "position", None)
+            }
+            loaded[file] = {
+                "sch": sch,
+                "by_ref": by_ref,
+                "occupied": occupied,
+                "dirty": False,
+            }
+        return loaded[file]
+
+    # Seed the flag index past any #FLG already present in ANY involved sheet, so
+    # #FLG refs stay unique hierarchy-wide and a second pass never re-emits #FLG01
+    # (stage 17.2). For a flat design this is just the root file (unchanged).
+    involved = {_target_file(u) for (_, _, u, _) in undriven}
+    all_refs: List[str] = []
+    for file in involved:
+        all_refs.extend(_load(file)["by_ref"].keys())
+    flag_index = _next_flag_index(all_refs)
+
+    def _net_of(file_state: dict, ref: str, pin: str) -> Optional[str]:
+        # Power pseudo-symbols are excluded from the netlist -> use their value
+        # (read from the sheet file the pin actually lives in).
         if ref.startswith("#"):
-            comp = by_ref.get(ref)
+            comp = file_state["by_ref"].get(ref)
             val = getattr(comp, "value", None) if comp is not None else None
             return str(val) if val else None
         return pin_net_map.get((ref, pin))
 
-    # Group flagged pins by the net they belong to.
-    net_pins: Dict[str, List[Tuple[str, str]]] = {}
-    for ref, pin in undriven:
-        net = _net_of(ref, pin)
+    # Group flagged pins by the (global) net they belong to, carrying each pin's
+    # sheet file so the flag lands where the anchor actually is.
+    net_pins: Dict[str, List[Tuple[str, str, str, Tuple]]] = {}
+    for ref, pin, uuid_path, pos in undriven:
+        file = _target_file(uuid_path)
+        fs = _load(file)
+        net = _net_of(fs, ref, pin)
         if net is None:
             logger.debug("ERC autofix: %s could not resolve to a net; skipping", (ref, pin))
             continue
@@ -379,27 +453,29 @@ def _apply_power_flag_autofixes(
             # A genuinely dangling power pin -- a flag here masks a real error.
             logger.debug("ERC autofix: %s on dangling net %r; report-only", (ref, pin), net)
             continue
-        net_pins.setdefault(net, []).append((ref, pin))
+        net_pins.setdefault(net, []).append((ref, pin, file, pos))
 
     added = 0
     for net in sorted(net_pins):
-        ref, pin = sorted(net_pins[net])[0]  # deterministic anchor pin
+        # Deterministic anchor: sort by (ref, pin, file), take the first.
+        ref, pin, file, item_pos = sorted(net_pins[net])[0]
+        fs = _load(file)
+        sch = fs["sch"]
         pos = sch.get_component_pin_position(ref, pin)
         if pos is not None:
             px, py = pos.x, pos.y
+        elif item_pos and item_pos[0] is not None and item_pos[1] is not None:
+            px, py = item_pos
         else:
-            fb = item_pos.get((ref, pin))
-            if not fb or fb[0] is None or fb[1] is None:
-                logger.debug(
-                    "ERC autofix: no pin position for %s pin %s; skipping", ref, pin
-                )
-                continue
-            px, py = fb
+            logger.debug(
+                "ERC autofix: no pin position for %s pin %s; skipping", ref, pin
+            )
+            continue
 
         # Canonical flag point for this net. Deterministic (same net -> same anchor
         # -> same point), so an existing flag here means the net is already flagged.
         flag_pos = (px, py + 5.08)
-        if _pt_key(*flag_pos) in occupied:
+        if _pt_key(*flag_pos) in fs["occupied"]:
             logger.debug(
                 "ERC autofix: canonical flag point for net %r already occupied "
                 "(via %s pin %s); skipping to avoid stacking",
@@ -417,20 +493,26 @@ def _apply_power_flag_autofixes(
             value="PWR_FLAG",
             position=flag_pos,
         )
-        occupied.add(_pt_key(*flag_pos))
+        fs["occupied"].add(_pt_key(*flag_pos))
         wire = sch.add_wire_between_pins(ref, pin, flag_ref, "1")
         if wire is None:
             logger.debug(
                 "ERC autofix: could not wire PWR_FLAG to %s pin %s", ref, pin
             )
             continue
+        fs["dirty"] = True
         added += 1
         logger.info(
-            "ERC autofix: added PWR_FLAG on net '%s' (via %s pin %s)", net, ref, pin
+            "ERC autofix: added PWR_FLAG on net '%s' (via %s pin %s in %s)",
+            net,
+            ref,
+            pin,
+            Path(file).name,
         )
 
-    if added:
-        sch.save()
+    for fs in loaded.values():
+        if fs["dirty"]:
+            fs["sch"].save()
     return added
 
 

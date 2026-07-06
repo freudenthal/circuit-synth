@@ -105,18 +105,20 @@ def _three_sheet_top():
 # --- helpers ----------------------------------------------------------------
 
 
-def _generate(builder, name, tmp_path: Path) -> Path:
+def _generate(builder, name, tmp_path: Path, erc_gate: bool = False) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        # erc_gate off: the root-label fix is at generation time; keeping the gate
-        # out makes the residual deterministic (see module docstring).
+        # erc_gate=False (default here): the root-label fix is at generation time,
+        # so the label check is isolated and the power residual is deterministic.
+        # erc_gate=True exercises the full gate, incl. the sheet-aware PWR_FLAG
+        # autofix that clears the child-sheet GND power pin.
         # update_source_refs=False: never rewrite this test's ref="R" prefixes.
         builder().generate_kicad_project(
             project_name=name,
             generate_pcb=False,
-            erc_gate=False,
+            erc_gate=erc_gate,
             selective_wires=False,
             update_source_refs=False,
         )
@@ -186,3 +188,21 @@ def test_bundled_hierarchical_example_no_root_hier_errors(tmp_path):
     sch = _generate(_two_sheet_top, "two_sheet_top", tmp_path / "example")
     report = _require_erc(sch)
     assert _root_hier_label_errors(report) == [], report.summary()
+
+
+# --- full ERC clean with the gate on (sheet-aware PWR_FLAG autofix) ----------
+
+
+def test_two_sheet_erc_gate_reaches_zero_errors(tmp_path):
+    """With erc_gate on, the two-sheet design reaches 0 kicad-cli ERC errors:
+    the sheet-aware autofix places a PWR_FLAG in the CHILD sheet that owns the
+    GND power symbol (the root sheet has none)."""
+    sch = _generate(_two_sheet_top, "two_sheet_top", tmp_path / "g2", erc_gate=True)
+    report = _require_erc(sch)
+    assert report.error_count == 0, report.summary()
+
+
+def test_three_sheet_erc_gate_reaches_zero_errors(tmp_path):
+    sch = _generate(_three_sheet_top, "three_sheet_top", tmp_path / "g3", erc_gate=True)
+    report = _require_erc(sch)
+    assert report.error_count == 0, report.summary()

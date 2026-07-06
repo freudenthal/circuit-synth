@@ -21,6 +21,7 @@ from circuit_synth.kicad.sch_gen.erc_gate import (
     ErcViolation,
     _apply_power_flag_autofixes,
     _invert_named_nets,
+    _map_sheet_uuids_to_files,
     _next_flag_index,
     _parse_erc_json,
     classify,
@@ -88,6 +89,74 @@ def test_violation_references():
     report = _parse_erc_json(_KICAD10_ERC, "x.kicad_sch")
     assert report.violations[0].references == ["#PWR001"]
     assert report.violations[1].references == []
+
+
+# --------------------------------------------------------------------------- #
+# Sheet-aware autofix (multi-sheet): uuid_path parse + sheet-uuid -> file map.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_uuid_path_for_child_sheet():
+    """A violation in a subsheet carries that sheet's uuid_path (last = sheet sym)."""
+    data = {
+        "sheets": [
+            {
+                "path": "/psu/",
+                "uuid_path": "/root-uuid/psu-sheet-uuid",
+                "violations": [
+                    {
+                        "type": "power_pin_not_driven",
+                        "severity": "error",
+                        "description": "Input Power pin not driven",
+                        "items": [
+                            {"description": "Symbol #PWR001 Pin 1 [Power input, Line]"}
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    report = _parse_erc_json(data, "root.kicad_sch")
+    v = report.violations[0]
+    assert v.uuid_path == "/root-uuid/psu-sheet-uuid"
+    assert v.sheet == "/psu/"
+
+
+def test_map_sheet_uuids_to_files(tmp_path):
+    """Each (sheet ...) block's uuid maps to its resolved Sheetfile path."""
+    root = tmp_path / "root.kicad_sch"
+    psu_uuid = "bdf9ae2d-b9a3-4281-9ee7-4e2bdf696442"
+    load_uuid = "5613ed67-5960-4683-8924-2c6b97d6945c"
+    pin_uuid = "aaaaaaaa-1111-2222-3333-444444444444"
+    # KiCad indents sheet contents with two tabs; the block closes at one tab.
+    root.write_text(
+        "(kicad_sch\n"
+        "\t(sheet\n"
+        f'\t\t(uuid "{psu_uuid}")\n'
+        '\t\t(property "Sheetname" "psu"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+        '\t\t(property "Sheetfile" "psu.kicad_sch"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+        f'\t\t(pin "V5" bidirectional\n\t\t\t(uuid "{pin_uuid}")\n\t\t)\n'
+        "\t)\n"
+        "\t(sheet\n"
+        f'\t\t(uuid "{load_uuid}")\n'
+        '\t\t(property "Sheetname" "load"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+        '\t\t(property "Sheetfile" "load.kicad_sch"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+        "\t)\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    mapping = _map_sheet_uuids_to_files(str(root))
+    assert mapping[psu_uuid] == str((tmp_path / "psu.kicad_sch").resolve())
+    assert mapping[load_uuid] == str((tmp_path / "load.kicad_sch").resolve())
+    # The pin's inner uuid must NOT be picked up as a sheet uuid (first uuid wins).
+    assert pin_uuid not in mapping
+
+
+def test_map_sheet_uuids_flat_has_no_sheets(tmp_path):
+    """A flat schematic (no sheet blocks) maps to nothing (autofix falls to root)."""
+    root = tmp_path / "flat.kicad_sch"
+    root.write_text("(kicad_sch\n\t(symbol\n\t\t(uuid \"x\")\n\t)\n)\n", encoding="utf-8")
+    assert _map_sheet_uuids_to_files(str(root)) == {}
 
 
 # --------------------------------------------------------------------------- #
