@@ -320,6 +320,11 @@ class SpiceConverter:
         # actionable "set Sim.Device=BUCK/BOOST" error (explicit beats guessing).
         if "Regulator_Switching:" in symbol:
             return "switcher_unknown"
+        # Transformers before the op-amp heuristic (defensive); matches every
+        # Device:Transformer_* variant, though only 1P_1S pin names (AA/AB/SA/SB)
+        # resolve -- multi-winding parts fail terminal resolution with a clear error.
+        if "Device:Transformer" in symbol:
+            return "transformer"
         if any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
             return "opamp"
         if "Transistor_BJT:" in symbol or "Device:Q" in symbol:
@@ -346,6 +351,8 @@ class SpiceConverter:
         "LDO": "ldo",
         "BUCK": "buck",
         "BOOST": "boost",
+        "TRANSFORMER": "transformer",
+        "XFMR": "transformer",
     }
 
     @staticmethod
@@ -443,6 +450,7 @@ class SpiceConverter:
             "ldo": self._add_ldo,
             "buck": self._add_buck,
             "boost": self._add_boost,
+            "transformer": self._add_transformer,
             "bjt": self._add_bjt_transistor,
             "mosfet": self._add_mosfet,
         }
@@ -1339,6 +1347,100 @@ class SpiceConverter:
         logger.debug(
             f"Added LDO {ref} (behavioral macromodel, tier={tier}): in={inn}, "
             f"out={nout}, gnd={gnd}, VOUT={vout}, VDROP={vdrop}, RSER={rser}, IQ={iq}"
+        )
+
+    # ------------------------------------------------------------------ #
+    # Transformers: coupled inductors via a K element (Stage 21.1)        #
+    # ------------------------------------------------------------------ #
+
+    def _transformer_terminals(self, component):
+        """Resolve a 1P/1S transformer's AA/AB/SA/SB SPICE nodes by pin name.
+
+        KiCad's ``Device:Transformer_1P_1S`` names its pins AA/AB (primary) and
+        SA/SB (secondary), with the polarity dots printed at AA and SA. Returns a
+        dict of all four nodes or None when any winding end is unconnected (no
+        half-wound transformers) or no live pin map is available.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        nodes = {}
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue
+            name = (getattr(pin, "name", "") or "").strip().upper()
+            if name in ("AA", "AB", "SA", "SB") and name not in nodes:
+                nodes[name] = self.node_map.get(net.name, net.name)
+        if set(nodes) != {"AA", "AB", "SA", "SB"}:
+            return None
+        return nodes
+
+    def _transformer_params(self, component) -> Optional[dict]:
+        """Winding params for a transformer, or None if LP / the ratio is missing.
+
+        ``LP`` (primary inductance) is required; the secondary comes from an
+        explicit ``LS`` or is derived as ``LP*N^2`` from the turns ratio ``N``
+        (Ns/Np). ``K`` is the coupling coefficient, default 0.999; a value outside
+        (0, 1] is rejected (ngspice requires it).
+        """
+        raw = self._parse_sim_params(self._sim_props(component).get("params"))
+        lp = self._parse_si_number(raw["LP"]) if "LP" in raw else None
+        if not lp or lp <= 0:
+            return None
+        ls = self._parse_si_number(raw["LS"]) if "LS" in raw else None
+        if ls is None:
+            n_ratio = self._parse_si_number(raw["N"]) if "N" in raw else None
+            if not n_ratio or n_ratio <= 0:
+                return None
+            ls = lp * n_ratio * n_ratio
+        if ls <= 0:
+            return None
+        k = self._parse_si_number(raw["K"]) if "K" in raw else 0.999
+        if k is None or not (0 < k <= 1):
+            return {"LP": lp, "LS": ls, "K": None}  # bad k -> validate() names it
+        return {"LP": lp, "LS": ls, "K": k}
+
+    def _add_transformer(self, component, ref: str, value: str):
+        """Emit a transformer as two coupled inductors + a ``K`` card (raw_spice).
+
+        Node order follows the KiCad symbol's dots (AA first, SA first), so the
+        SPICE dot convention matches the printed dots and winding polarity is set
+        entirely by user wiring -- a flyback ties the secondary dot (SA) to the
+        secondary return and feeds the rectifier from SB. Winding currents are
+        readable via ``branch_current("<ref>_P")`` / ``("<ref>_S")``.
+
+        Simulation caveat (SPICE, not the design): every node needs a DC path to
+        ground, so a galvanically isolated secondary must share the sim's GND net
+        (or bridge to it through a large resistor).
+        """
+        term = self._transformer_terminals(component)
+        if term is None:
+            logger.warning(
+                f"transformer {ref}: needs all of AA/AB/SA/SB connected - skipping"
+            )
+            return
+        params = self._transformer_params(component)
+        if params is None or params["K"] is None:
+            logger.warning(
+                f'transformer {ref}: unresolved winding params - skipping '
+                f'(set Sim.Params="lp=100u n=0.5")'
+            )
+            return
+        n = self._fmt_num
+        lp, ls, k = n(params["LP"]), n(params["LS"]), n(params["K"])
+        lines = [
+            f"L{ref}_P {term['AA']} {term['AB']} {lp}",
+            f"L{ref}_S {term['SA']} {term['SB']} {ls}",
+            f"K{ref} L{ref}_P L{ref}_S {k}",
+        ]
+        self.spice_circuit.raw_spice += "\n" + "\n".join(lines)
+        self.model_provenance[ref] = ResolvedModel(
+            ref, "transformer", "sim_params", f"xfmr(lp={lp}, ls={ls}, k={k})"
+        )
+        logger.info(
+            f"{ref}: transformer as coupled inductors (lp={lp}, ls={ls}, k={k}); "
+            f"dots at AA/SA per the KiCad symbol"
         )
 
     # ------------------------------------------------------------------ #
@@ -2420,6 +2522,32 @@ class SpiceConverter:
                 problems.append(
                     f'{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. '
                     f'Sim.Params="fsw=500k vout=3.3"'
+                )
+
+        # 4d. Transformers: all four winding ends connected + resolvable params.
+        for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
+            if self._kind(component) != "transformer":
+                continue
+            ref = self._attr(component, "ref", None) or "?"
+            if (
+                getattr(component, "_pins", None) is not None
+                and self._transformer_terminals(component) is None
+            ):
+                problems.append(
+                    f"{ref}: transformer needs all of AA/AB/SA/SB pins connected "
+                    f"(no half-wound transformers)"
+                )
+            params = self._transformer_params(component)
+            if params is None:
+                problems.append(
+                    f'{ref}: transformer needs Sim.Params with LP and N (or LS), '
+                    f'e.g. Sim.Params="lp=100u n=0.5"'
+                )
+            elif params["K"] is None:
+                problems.append(
+                    f"{ref}: transformer coupling k must be in (0, 1]"
                 )
 
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a

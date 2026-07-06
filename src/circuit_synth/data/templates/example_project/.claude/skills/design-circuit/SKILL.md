@@ -243,6 +243,18 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   crossover well below the LC resonance. For a quick stability *proxy* without the
   averaged model, the cycle model's load-step transient (a `PWL` current load) shows
   ringing/settling — use that when you only need "does it ring", not exact margins.
+- **Transformers / coupled inductors** — a `Device:Transformer_1P_1S` symbol (or any
+  symbol with `Sim.Device="TRANSFORMER"`) simulates as two coupled inductors + a SPICE
+  `K` element. Give it `Sim.Params="lp=100u n=0.5"` (`lp` = primary inductance,
+  required; `n` = turns ratio Ns/Np, or an explicit `ls`; `k` coupling default 0.999,
+  must be in (0,1]). **Polarity follows the symbol's printed dots** (AA on the
+  primary, SA on the secondary) — a flyback ties the secondary dot SA to the
+  secondary return and feeds the rectifier from SB. Winding currents:
+  `branch_current("T1_P")` / `("T1_S")`. **Simulation caveat:** SPICE needs a DC path
+  from every node to ground, so tie the isolated secondary's return to the sim's GND
+  net (or bridge it with a large resistor) — this is a simulation artifact, not a
+  design change. Lower `k` (leakage) is realistic but makes transients slow and
+  spiky; `k=1` is the fast idealization.
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);
