@@ -179,6 +179,17 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `Sim.Gbw="1.4G"` to opt into a single-pole GBW-limited macromodel — then the Rf·Cf
   pole, source capacitance, and finite loop bandwidth interact, so cap-limited rolloff
   and gain peaking become visible. Without `Sim.Gbw` the ideal model is unchanged.
+- **Linear regulators / LDOs** (a `Regulator_Linear:*` symbol, or any symbol with
+  `Sim.Device="LDO"`) simulate as a datasheet-parameterized behavioral macromodel:
+  the output regulates to `VOUT`, tracks `VIN-VDROP` in dropout, and draws `IQ` from
+  the input. Give it `Sim.Params="vout=3.3 vdrop=0.3 rser=0.1 iq=2m"` (only `vout` is
+  required — `vdrop` defaults 0.3 V, `rser` 0.05 Ω, `iq` 1 mA; a bare `m` means milli
+  here). Alternatively name a ModelLibrary entry carrying a `VOUT` param via `value=`
+  (tier `datasheet_fit`). The tier is recorded in `sim.model_provenance[ref]` and
+  logged. **An LDO with no resolvable `VOUT` is a hard error** (a regulator's output
+  cannot be guessed). **Limitation:** the macromodel has no current limit or thermal
+  foldback — it will source unlimited current into a short, so don't use it to check
+  overload/short-circuit protection.
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);

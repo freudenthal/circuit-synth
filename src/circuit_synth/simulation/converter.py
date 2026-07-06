@@ -304,6 +304,10 @@ class SpiceConverter:
             or symbol == "Device:I"
         ):
             return "current_source"
+        # Linear regulators before the op-amp heuristic: many regulator names
+        # contain "lm" (LM317/LM1117) and would otherwise be misread as op-amps.
+        if "Regulator_Linear:" in symbol:
+            return "ldo"
         if any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
             return "opamp"
         if "Transistor_BJT:" in symbol or "Device:Q" in symbol:
@@ -327,6 +331,7 @@ class SpiceConverter:
         "PMOS": "mosfet",
         "V": "voltage_source",
         "I": "current_source",
+        "LDO": "ldo",
     }
 
     @staticmethod
@@ -401,6 +406,7 @@ class SpiceConverter:
             "voltage_source": self._add_voltage_source,
             "current_source": self._add_current_source,
             "opamp": self._add_opamp,
+            "ldo": self._add_ldo,
             "bjt": self._add_bjt_transistor,
             "mosfet": self._add_mosfet,
         }
@@ -1087,6 +1093,207 @@ class SpiceConverter:
                 if gbw and float(gbw) > 0:
                     return float(gbw), "datasheet_fit"
         return None, "generic"
+
+    # ------------------------------------------------------------------ #
+    # Linear regulators / LDOs: Tier-A behavioral macromodel (Stage 20.1) #
+    # ------------------------------------------------------------------ #
+
+    # Pin names (upper-cased) that identify an LDO's three terminals, so the model
+    # is correct regardless of the symbol's pin numbering. First connected match
+    # wins. A ground pin named ADJ is accepted (adjustable parts) but warned about.
+    _LDO_IN_NAMES = {"VI", "VIN", "IN", "VIN+", "IN+", "VCC"}
+    _LDO_OUT_NAMES = {"VO", "VOUT", "OUT"}
+    _LDO_GND_NAMES = {"GND", "ADJ", "GND/ADJ"}
+
+    # Macromodel param defaults (VOUT has no default -- it must be resolved).
+    _LDO_PARAM_DEFAULTS = {"VDROP": 0.3, "RSER": 0.05, "IQ": 1e-3}
+
+    @staticmethod
+    def _parse_si_number(raw) -> Optional[float]:
+        """Parse an LDO param value ('3.3', '0.3', '100m', '2m', '1u') to float.
+
+        For LDO params (volts / ohms / amps) a bare ``m`` means **milli** and ``u``
+        micro -- unlike the resistor-value parser, mega/kilo-scale regulator params
+        are nonsensical here, so this small dedicated parser keeps ``m`` unambiguous.
+        Plain decimals pass straight through. Returns None if unparseable.
+        """
+        if raw is None:
+            return None
+        s = str(raw).strip().lower().replace(" ", "")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        m = re.match(r"^(-?[0-9.]+)([a-z]+)$", s)
+        if not m:
+            return None
+        mult = {
+            "k": 1e3,
+            "meg": 1e6,
+            "m": 1e-3,
+            "u": 1e-6,
+            "n": 1e-9,
+            "p": 1e-12,
+        }.get(m.group(2))
+        if mult is None:
+            return None
+        try:
+            return float(m.group(1)) * mult
+        except ValueError:
+            return None
+
+    def _ldo_terminals(self, component):
+        """Resolve an LDO's (in, out, gnd) SPICE nodes by pin NAME.
+
+        Uses the live pin map and considers only connected pins, so an unconnected
+        EN/SENSE pin is ignored. Returns ``(nin, nout, ngnd)`` or None when a signal
+        terminal is missing or no live pin map is available (dict/JSON circuits).
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        nin = nout = ngnd = None
+        adj_used = False
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue
+            name = (getattr(pin, "name", "") or "").strip().upper()
+            node = self.node_map.get(net.name, net.name)
+            if nin is None and name in self._LDO_IN_NAMES:
+                nin = node
+            elif nout is None and name in self._LDO_OUT_NAMES:
+                nout = node
+            elif ngnd is None and name in self._LDO_GND_NAMES:
+                ngnd = node
+                adj_used = name == "ADJ"
+        if nin is None or nout is None or ngnd is None:
+            return None
+        if adj_used:
+            logger.warning(
+                f"LDO {getattr(component, 'ref', '?')}: ADJ pin used as the "
+                f"reference/ground node; adjustable output modeled as a fixed VOUT "
+                f"(the external divider is not read)"
+            )
+        return nin, nout, ngnd
+
+    def _ldo_lib_params(self, value) -> Optional[dict]:
+        """LDO macromodel params from a ModelLibrary entry named by ``value``.
+
+        A SUBCKT-type entry carrying a ``VOUT`` param maps VOUT/VDROPOUT/IQ onto the
+        macromodel (RSER falls back to its default). Returns None if no such entry.
+        """
+        name = (value or "").strip()
+        if not name:
+            return None
+        try:
+            from circuit_synth.simulation.models import get_model_library
+
+            model = get_model_library().models.get(name)
+        except Exception:  # pragma: no cover - library import/init failure
+            model = None
+        params = getattr(model, "parameters", None) if model is not None else None
+        if not isinstance(params, dict) or "VOUT" not in params:
+            return None
+        return {
+            "VOUT": float(params["VOUT"]),
+            "VDROP": float(params.get("VDROPOUT", self._LDO_PARAM_DEFAULTS["VDROP"])),
+            "RSER": float(params.get("RSER", self._LDO_PARAM_DEFAULTS["RSER"])),
+            "IQ": float(params.get("IQ", self._LDO_PARAM_DEFAULTS["IQ"])),
+        }
+
+    def _ldo_params(self, component, value):
+        """(params, tier) for an LDO, or ``(None, "sim_params")`` if VOUT unresolved.
+
+        ``Sim.Params`` (with VOUT) wins at tier ``sim_params``; otherwise a
+        ModelLibrary entry named by ``value`` gives tier ``datasheet_fit``.
+        """
+        raw = self._parse_sim_params(self._sim_props(component).get("params"))
+        if "VOUT" in raw:
+            vout = self._parse_si_number(raw["VOUT"])
+            if vout is not None:
+                params = {"VOUT": vout}
+                for key, default in self._LDO_PARAM_DEFAULTS.items():
+                    parsed = self._parse_si_number(raw[key]) if key in raw else None
+                    params[key] = parsed if parsed is not None else default
+                return params, "sim_params"
+        lib = self._ldo_lib_params(value)
+        if lib is not None:
+            return lib, "datasheet_fit"
+        return None, "sim_params"
+
+    @staticmethod
+    def _fmt_num(x: float) -> str:
+        """Compact numeric literal for a netlist ('3.3', '0.002', not '0.0020000')."""
+        return f"{x:g}"
+
+    def _add_ldo(self, component, ref: str, value: str):
+        """Add a linear regulator as a datasheet-parameterized behavioral macromodel.
+
+        Emits (VOUT/VDROP/RSER/IQ from Sim.Params or a ModelLibrary entry)::
+
+            B<ref>_reg <reg> <gnd> V = min(VOUT, V(<in>,<gnd>)-VDROP)
+            R<ref>_ser <reg> <out> RSER
+            B<ref>_iq  <in> <gnd> I = IQ
+
+        so the output regulates to VOUT, tracks (VIN-VDROP) in dropout, and draws a
+        quiescent current from the input. The B-sources go through ``raw_spice``
+        (PySpice has no first-class behavioral-source polarity we need); the series
+        resistor is a normal element. Limitation: no current limit / thermal
+        foldback -- the output is a voltage-behavioral source and will source
+        unlimited current into a short.
+        """
+        terminals = self._ldo_terminals(component)
+        if terminals is None:
+            nodes = self._get_component_nodes(component)
+            if len(nodes) < 3:
+                logger.warning(
+                    f"LDO {ref} needs at least 3 connections, got {len(nodes)}"
+                )
+                return
+            # Positional fallback (no live pin names): assume 78xx-style IN, GND, OUT.
+            nin, ngnd, nout = nodes[0], nodes[1], nodes[2]
+            logger.warning(
+                f"LDO {ref}: no live pin map; assuming pin order IN, GND, OUT"
+            )
+        else:
+            nin, nout, ngnd = terminals
+
+        params, tier = self._ldo_params(component, value)
+        if params is None:
+            # validate() reports this in strict mode; the lenient path just skips.
+            logger.warning(
+                f"LDO {ref}: no VOUT resolved -- skipping "
+                f'(set Sim.Params="vout=3.3 vdrop=0.3")'
+            )
+            return
+
+        vout = self._fmt_num(params["VOUT"])
+        vdrop = self._fmt_num(params["VDROP"])
+        rser = self._fmt_num(params["RSER"])
+        iq = self._fmt_num(params["IQ"])
+        gnd = str(ngnd)
+        inn = str(nin)
+        reg = f"{ref}_reg"
+
+        self.spice_circuit.raw_spice += (
+            f"\nB{ref}_reg {reg} {gnd} V = min({vout}, V({inn},{gnd})-{vdrop})"
+        )
+        self.spice_circuit.R(f"{ref}_ser", reg, nout, rser)
+        self.spice_circuit.raw_spice += f"\nB{ref}_iq {inn} {gnd} I = {iq}"
+
+        self.model_provenance[ref] = ResolvedModel(
+            ref=ref,
+            kind="ldo",
+            tier=tier,
+            name=f"ldo_macro(vout={vout},vdrop={vdrop})",
+        )
+        logger.debug(
+            f"Added LDO {ref} (behavioral macromodel, tier={tier}): in={inn}, "
+            f"out={nout}, gnd={gnd}, VOUT={vout}, VDROP={vdrop}, RSER={rser}, IQ={iq}"
+        )
 
     @staticmethod
     def _parse_frequency(value) -> Optional[float]:
@@ -1842,6 +2049,30 @@ class SpiceConverter:
                 problems.append(
                     f"{ref}: op-amp needs >=3 connected pins (in+, in-, out), "
                     f"found {count}"
+                )
+
+        # 4b. LDOs need their three terminals (in, out, gnd) connected, and a VOUT
+        #     that resolves -- a regulator's output voltage cannot be guessed.
+        for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
+            if self._kind(component) != "ldo":
+                continue
+            ref = self._attr(component, "ref", None) or "?"
+            count = self._connected_pin_count(component)
+            if count is not None and count < 3:
+                problems.append(
+                    f"{ref}: LDO needs >=3 connected pins (in, out, gnd), "
+                    f"found {count}"
+                )
+            params, _tier = self._ldo_params(
+                component, self._attr(component, "value", None)
+            )
+            if params is None:
+                problems.append(
+                    f"{ref}: LDO has no resolvable output voltage; set "
+                    f'Sim.Params="vout=3.3 vdrop=0.3" (or name a ModelLibrary '
+                    f"entry with a VOUT param via value=)"
                 )
 
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
