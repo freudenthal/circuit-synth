@@ -1159,14 +1159,7 @@ class SchematicWriter:
             return {n.name for n in nets}
 
         # Find this sheet's parent circuit (the one whose children include it).
-        parent = None
-        for circ in self.all_subcircuits.values():
-            for child_info in getattr(circ, "child_instances", []) or []:
-                if child_info.get("sub_name") == self.circuit.name:
-                    parent = circ
-                    break
-            if parent is not None:
-                break
+        parent = self._find_parent_circuit()
 
         if parent is not None:
             # 1) Shared with the parent sheet?
@@ -1183,14 +1176,34 @@ class SchematicWriter:
                 if net_name in _net_names(self.all_subcircuits.get(sib.get("sub_name"))):
                     return True
 
-        # 3) Used by one of this sheet's own children?
-        for child_info in getattr(self.circuit, "child_instances", []) or []:
-            child_circ = self.all_subcircuits.get(child_info.get("sub_name"))
-            if net_name in _net_names(child_circ):
-                return True
+            # 3) Used by one of this sheet's own children? (non-root only)
+            #    A hierarchical label declares a port of the sheet it sits in, which
+            #    binds to a sheet pin in the PARENT. The ROOT has no parent, so a
+            #    hierarchical label in the root is an ERC error (bug #9). The root
+            #    joins its child sheet pins with LOCAL labels instead (see the
+            #    sheet-pin label writer in _add_subcircuit_sheets), so this case is
+            #    only meaningful when there is a parent above us.
+            for child_info in getattr(self.circuit, "child_instances", []) or []:
+                child_circ = self.all_subcircuits.get(child_info.get("sub_name"))
+                if net_name in _net_names(child_circ):
+                    return True
 
-        # Otherwise it is internal to this sheet -> local label.
+        # Otherwise it is internal to this sheet (or the root joining children) ->
+        # local label.
         return False
+
+    def _find_parent_circuit(self):
+        """This sheet's parent circuit, or None if it is the root.
+
+        The parent is whichever subcircuit lists this sheet as a child instance.
+        A None result means this writer is rendering the root sheet -- which has
+        no parent sheet pin for a hierarchical label to bind to.
+        """
+        for circ in self.all_subcircuits.values():
+            for child_info in getattr(circ, "child_instances", []) or []:
+                if child_info.get("sub_name") == self.circuit.name:
+                    return circ
+        return None
 
     def _add_power_symbol(
         self,
@@ -1706,6 +1719,13 @@ class SchematicWriter:
             len(self.circuit.child_instances),
         )
 
+        # A sheet pin is joined to the rest of THIS sheet by a same-named label at
+        # the pin. In a NON-root sheet that label re-exports the net upward, so it
+        # is hierarchical; in the ROOT there is no parent to export to, and a
+        # hierarchical label in the root is an ERC error (bug #9). The root joins
+        # its child sheet pins with LOCAL labels (same name -> connected by name).
+        is_root_sheet = self._find_parent_circuit() is None
+
         for child_info in self.circuit.child_instances:
             sub_name = child_info["sub_name"]
             usage_label = child_info["instance_label"]
@@ -1905,7 +1925,9 @@ class SchematicWriter:
                     uuid=str(uuid_module.uuid4()),
                     position=Point(label_x, pin_y),
                     text=net_name,
-                    label_type=LabelType.HIERARCHICAL,
+                    label_type=(
+                        LabelType.LOCAL if is_root_sheet else LabelType.HIERARCHICAL
+                    ),
                     rotation=0.0,
                 )
 
