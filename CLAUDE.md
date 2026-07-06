@@ -102,7 +102,6 @@ circuit-synth/
 │   ├── unit/            # incl. test_loop_boundary_contract.py
 │   ├── bidirectional/   # KiCad <-> Python sync test suite
 │   └── ...
-├── tools/               # dev/CI utilities (not shipped at runtime)
 └── .claude/
     ├── agents/          # dev agents
     └── commands/dev/    # slash commands
@@ -115,9 +114,8 @@ Not poetry.
 
 ## Commands
 
-- `/dev:run-tests` — run the test suite
-- `/dev:update-and-commit [description]` — document changes and commit
-- `/dev:dead-code-analysis` — find unused code
+- Run tests directly: `uv run pytest` (see Testing below).
+- `/dev:update-and-commit [description]` — document changes and commit.
 - Code review / security: use the built-in `/code-review`, `/review`, and
   `/security-review`.
 
