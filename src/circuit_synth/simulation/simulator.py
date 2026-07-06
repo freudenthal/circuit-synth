@@ -288,6 +288,103 @@ class SimulationResult:
                 return float(10 ** (fa + t * (fb - fa)))
         return None
 
+    # -- transient measurement helpers (Stage 20.3) ----------------------- #
+
+    def _node_series(self, node: str):
+        """(time, value) real ndarrays for a transient node."""
+        import numpy as np
+
+        t = self.time_array()
+        v = np.real(np.asarray(self.analysis[node])).astype(float)
+        return t, v
+
+    @staticmethod
+    def _tail_mask(t, tail_frac: float):
+        """Boolean mask selecting the last ``tail_frac`` of the time axis."""
+        span = float(t[-1] - t[0])
+        return t >= (t[-1] - tail_frac * span)
+
+    def average(self, node: str, tail_frac: float = 0.2) -> float:
+        """Mean of ``node`` over the last ``tail_frac`` of the run (steady state)."""
+        import numpy as np
+
+        t, v = self._node_series(node)
+        return float(np.mean(v[self._tail_mask(t, tail_frac)]))
+
+    def ripple_pp(self, node: str, tail_frac: float = 0.2) -> float:
+        """Peak-to-peak ripple of ``node`` over the last ``tail_frac`` of the run.
+
+        Note: use a fine transient step (e.g. <= 1/50 of the switching period) --
+        a coarse step aliases the PWM edges and inflates the apparent ripple.
+        """
+        import numpy as np
+
+        t, v = self._node_series(node)
+        return float(np.ptp(v[self._tail_mask(t, tail_frac)]))
+
+    def settling_time(
+        self, node: str, final: Optional[float] = None, tol: float = 0.02
+    ) -> Optional[float]:
+        """First time after which ``node`` stays within +/-``tol``*final of ``final``.
+
+        ``final`` defaults to the mean over the last 10% of the run. Returns None if
+        the waveform never settles (still outside the band at the last sample).
+        """
+        import numpy as np
+
+        t, v = self._node_series(node)
+        if final is None:
+            final = float(np.mean(v[self._tail_mask(t, 0.1)]))
+        band = abs(tol * final) if final != 0 else abs(tol)
+        outside = np.where(np.abs(v - final) > band)[0]
+        if len(outside) == 0:
+            return float(t[0])
+        last = int(outside[-1])
+        if last >= len(t) - 1:
+            return None
+        return float(t[last + 1])
+
+    def branch_current(self, name: str):
+        """Branch current through an element (e.g. an inductor ``'L1'``) as an ndarray.
+
+        Pass the schematic ref (case-insensitive). ngspice exposes inductor and
+        voltage-source branch currents; PySpice prepends the element letter to the
+        ref, so ``L1`` becomes branch ``ll1`` and ``V1`` becomes ``vv1`` -- this
+        resolves both forms. Raises KeyError if no matching branch exists.
+        """
+        import numpy as np
+
+        branches = getattr(self.analysis, "branches", None) or {}
+        low = name.lower()
+        # Try the raw name, then the element-letter-prefixed form PySpice emits,
+        # then any branch whose key ends with the ref (defensive).
+        candidates = [low, "l" + low, "v" + low]
+        key = next((c for c in candidates if c in branches), None)
+        if key is None:
+            key = next((k for k in branches if k.endswith(low)), None)
+        if key is None:
+            raise KeyError(
+                f"no branch current for '{name}' (available: {sorted(branches)})"
+            )
+        return np.real(np.asarray(branches[key])).astype(float)
+
+    def average_power(
+        self, node: str, current_source: str, tail_frac: float = 0.2
+    ) -> float:
+        """Mean of ``V(node) * I(current_source)`` over the tail window.
+
+        For efficiency: input power ~= ``average_power(vin_node, "Vsource")`` (sign
+        per the source's current convention) and output power ~=
+        ``average(vout)**2 / Rload``.
+        """
+        import numpy as np
+
+        t = self.time_array()
+        v = np.real(np.asarray(self.analysis[node])).astype(float)
+        i = np.asarray(self.get_current(current_source), dtype=float)
+        m = self._tail_mask(t, tail_frac)
+        return float(np.mean(v[m] * i[m]))
+
     def list_nodes(self) -> List[str]:
         """List all available voltage nodes."""
         nodes = []
@@ -468,6 +565,18 @@ class CircuitSimulator:
         options: Optional[Dict] = None,
     ) -> SimulationResult:
         """Run AC analysis."""
+        switching = sorted(
+            ref
+            for ref, prov in self.model_provenance.items()
+            if getattr(prov, "kind", None) in ("buck", "boost")
+        )
+        if switching:
+            logger.warning(
+                f"AC analysis on switching macromodel(s) {', '.join(switching)} is "
+                f"not meaningful: a PWM comparator has no small-signal linearization. "
+                f"Use transient_analysis; loop-gain/phase-margin needs an averaged "
+                f"model."
+            )
         simulator = self._make_simulator(temperature, options)
         analysis = simulator.ac(
             start_frequency=start_freq @ u_Hz,

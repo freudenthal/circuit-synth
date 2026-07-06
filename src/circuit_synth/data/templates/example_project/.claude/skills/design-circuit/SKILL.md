@@ -190,6 +190,29 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   cannot be guessed). **Limitation:** the macromodel has no current limit or thermal
   foldback — it will source unlimited current into a short, so don't use it to check
   overload/short-circuit protection.
+- **Switching regulators (buck/boost)** (a `Regulator_Switching:*` symbol needs an
+  explicit `Sim.Device="BUCK"` or `"BOOST"` — topology can't be guessed) simulate as a
+  behavioral macromodel that replaces **only the IC**: the inductor, output cap, and
+  feedback divider stay your real schematic parts, so BOM/ERC/sourcing stay truthful.
+  Give it `Sim.Params="fsw=500k vout=3.3"` (both required; optional `vf` diode-drop
+  default 0.45, `ron_hs` 0.1, `dmax` 0.95/0.9, `vramp` 1.0). Terminals resolve by pin
+  name (SW/VIN/GND required, FB read but unused by v1). Run a **transient** with a fine
+  step (`sim.transient_analysis(step_time=10e-9, end_time=1e-3)` — use ≤ 1/50 of the
+  switching period, or PWM edges alias and inflate ripple). **This is an open-loop
+  computed-duty model** (provenance `*_openloop`): it tracks line and gives correct
+  steady-state output, ripple, and inductor stress, but has **no active load-step
+  recovery** (a load step shows the passive LC settling), is **non-synchronous** (diode
+  freewheel, so sync-rectifier efficiency is underestimated), and has **no current
+  limit**. `.ac` on it is meaningless (a PWM comparator has no small-signal
+  linearization — you'll get a warning); loop-gain/phase-margin needs the averaged
+  model (future work). **Boost** relies on your external rectifier diode (SW→OUT) and
+  inductor (VIN→SW), and needs `use_initial_condition=True` to converge. **Flyback and
+  other isolated/coupled-inductor topologies are not supported yet.**
+  - **Measuring a switching result** (`SimulationResult` helpers): `average(node)` /
+    `ripple_pp(node)` over the steady-state tail; `settling_time(node, final=...)`;
+    `branch_current("L1")` for inductor current (saturation margin — pass the
+    schematic ref). Efficiency: `Pout ≈ average("OUT")**2 / Rload`, `Pin ≈
+    average_power("VIN", "Vsource")` (mind the source's current sign).
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);

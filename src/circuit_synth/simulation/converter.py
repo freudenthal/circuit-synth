@@ -315,6 +315,11 @@ class SpiceConverter:
         # contain "lm" (LM317/LM1117) and would otherwise be misread as op-amps.
         if "Regulator_Linear:" in symbol:
             return "ldo"
+        # Switching regulators: topology (buck vs boost) can't be read from the
+        # symbol reliably, so classify to a pseudo-kind validate() turns into an
+        # actionable "set Sim.Device=BUCK/BOOST" error (explicit beats guessing).
+        if "Regulator_Switching:" in symbol:
+            return "switcher_unknown"
         if any(x in symbol.lower() for x in ["op", "amp", "lm", "tl"]):
             return "opamp"
         if "Transistor_BJT:" in symbol or "Device:Q" in symbol:
@@ -339,6 +344,8 @@ class SpiceConverter:
         "V": "voltage_source",
         "I": "current_source",
         "LDO": "ldo",
+        "BUCK": "buck",
+        "BOOST": "boost",
     }
 
     @staticmethod
@@ -434,6 +441,8 @@ class SpiceConverter:
             "current_source": self._add_current_source,
             "opamp": self._add_opamp,
             "ldo": self._add_ldo,
+            "buck": self._add_buck,
+            "boost": self._add_boost,
             "bjt": self._add_bjt_transistor,
             "mosfet": self._add_mosfet,
         }
@@ -1332,6 +1341,156 @@ class SpiceConverter:
             f"out={nout}, gnd={gnd}, VOUT={vout}, VDROP={vdrop}, RSER={rser}, IQ={iq}"
         )
 
+    # ------------------------------------------------------------------ #
+    # Switching regulators: behavioral buck/boost macromodel (Stage 20.3) #
+    # ------------------------------------------------------------------ #
+
+    # Pin names (upper-cased) identifying a switcher's terminals. SW/VIN/GND are
+    # required by the model; FB is the user's divider tap (not read by the
+    # open-loop model, resolved only for completeness). First connected match wins.
+    _SWITCH_SW_NAMES = {"SW", "LX", "SWITCH", "PH", "L1", "LX1"}
+    _SWITCH_FB_NAMES = {"FB", "VFB", "FEEDBACK", "VSENSE", "SENSE"}
+    _SWITCH_VIN_NAMES = {"VIN", "IN", "PVIN", "AVIN", "VCC"}
+    _SWITCH_GND_NAMES = {"GND", "PGND", "AGND", "EP"}
+
+    def _switcher_terminals(self, component):
+        """Resolve a switcher's SW/VIN/GND (and optional FB) SPICE nodes by pin name.
+
+        Returns a dict ``{"sw","vin","gnd","fb"}`` (fb may be None) or None when a
+        required terminal is missing or no live pin map is available.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        sw = vin = gnd = fb = None
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue
+            name = (getattr(pin, "name", "") or "").strip().upper()
+            node = self.node_map.get(net.name, net.name)
+            if sw is None and name in self._SWITCH_SW_NAMES:
+                sw = node
+            elif vin is None and name in self._SWITCH_VIN_NAMES:
+                vin = node
+            elif gnd is None and name in self._SWITCH_GND_NAMES:
+                gnd = node
+            elif fb is None and name in self._SWITCH_FB_NAMES:
+                fb = node
+        if sw is None or vin is None or gnd is None:
+            return None
+        return {"sw": sw, "vin": vin, "gnd": gnd, "fb": fb}
+
+    def _switcher_params(self, component, value, topology) -> Optional[dict]:
+        """Macromodel params for a switcher, or None if VOUT/FSW can't be resolved.
+
+        VOUT (target output) and FSW (switching frequency) are required; VF (diode
+        drop used for the first-order duty correction), DMAX, RON_HS and VRAMP take
+        defaults. All parsed with the milli-aware SI parser.
+        """
+        raw = self._parse_sim_params(self._sim_props(component).get("params"))
+        vout = self._parse_si_number(raw["VOUT"]) if "VOUT" in raw else None
+        fsw = self._parse_si_number(raw["FSW"]) if "FSW" in raw else None
+        if not vout or vout <= 0 or not fsw or fsw <= 0:
+            return None
+
+        def g(key, default):
+            v = self._parse_si_number(raw[key]) if key in raw else None
+            return v if v is not None else default
+
+        return {
+            "VOUT": vout,
+            "FSW": fsw,
+            "VF": g("VF", 0.45),
+            "DMAX": g("DMAX", 0.95 if topology == "buck" else 0.9),
+            "RON_HS": g("RON_HS", 0.1),
+            "VRAMP": g("VRAMP", 1.0),
+        }
+
+    def _add_buck(self, component, ref: str, value: str):
+        self._add_switching_regulator(component, ref, value, "buck")
+
+    def _add_boost(self, component, ref: str, value: str):
+        self._add_switching_regulator(component, ref, value, "boost")
+
+    def _add_switching_regulator(self, component, ref, value, topology):
+        """Emit a behavioral buck/boost macromodel replacing only the IC.
+
+        v1 is a **computed-duty open-loop** model (the closed loop was found to
+        limit-cycle in voltage mode; open-loop is robust and steady-state-accurate):
+
+          * a sawtooth PWM ramp at FSW,
+          * a duty from VOUT/VIN with a first-order diode-drop correction (buck:
+            ``D=(VOUT+VF)/(VIN+VF)``; boost: ``D=1-VIN/(VOUT+VF)``) -- tracks line,
+            not load,
+          * a comparator gating an ``S`` switch (buck: high-side + emitted freewheel
+            diode; boost: low-side, relying on the user's external rectifier diode).
+
+        The inductor, output cap and feedback divider stay the user's real parts.
+        Emitted via ``raw_spice`` (behavioral sources + a switch + ``.model`` cards).
+        Limitations (documented, not silently hidden): no active load-step recovery
+        (open loop), non-synchronous (diode Vf, so sync-rectifier efficiency is
+        underestimated), no current limit. Boost needs UIC to converge (start V(out)
+        at V(in)); buck converges without it.
+        """
+        term = self._switcher_terminals(component)
+        if term is None:
+            logger.warning(
+                f"{topology} {ref}: could not resolve SW/VIN/GND terminals - skipping"
+            )
+            return
+        params = self._switcher_params(component, value, topology)
+        if params is None:
+            logger.warning(
+                f'{topology} {ref}: no VOUT/FSW resolved - skipping '
+                f'(set Sim.Params="fsw=500k vout=3.3")'
+            )
+            return
+
+        sw, vin, gnd = str(term["sw"]), str(term["vin"]), str(term["gnd"])
+        n = self._fmt_num
+        vout = n(params["VOUT"])
+        vf = n(params["VF"])
+        dmax = n(params["DMAX"])
+        ron = n(params["RON_HS"])
+        vramp = n(params["VRAMP"])
+        per = 1.0 / params["FSW"]
+        saw, dd, gg = f"{ref}_saw", f"{ref}_d", f"{ref}_g"
+
+        if topology == "buck":
+            duty = f"({vout}+{vf})/(V({vin})+{vf})"
+        else:
+            duty = f"1 - V({vin})/({vout}+{vf})"
+
+        lines = [
+            f"V{ref}_saw {saw} {gnd} PULSE(0 {vramp} 0 "
+            f"{per * 0.99:.6g} {per * 0.005:.6g} {per * 0.005:.6g} {per:.6g})",
+            f"B{ref}_d {dd} {gnd} V = min(max({duty}, 0.0), {dmax})",
+            f"B{ref}_g {gg} {gnd} V = V({dd}) > V({saw}) ? 5 : 0",
+        ]
+        if topology == "buck":
+            lines += [
+                f"S{ref}_hs {vin} {sw} {gg} {gnd} SW{ref}",
+                f".model SW{ref} SW(Ron={ron} Roff=1e6 Vt=2.5 Vh=0.2)",
+                f"D{ref}_fw {gnd} {sw} DFW{ref}",
+                f".model DFW{ref} D(IS=1e-9 N=1.05 CJO=100p)",
+            ]
+        else:  # boost: low-side switch; user's schematic supplies L + rectifier D
+            lines += [
+                f"S{ref}_ls {sw} {gnd} {gg} {gnd} SW{ref}",
+                f".model SW{ref} SW(Ron={ron} Roff=1e6 Vt=2.5 Vh=0.2)",
+            ]
+
+        self.spice_circuit.raw_spice += "\n" + "\n".join(lines)
+        self.model_provenance[ref] = ResolvedModel(
+            ref, topology, "sim_params", f"{topology}_openloop(vout={vout})"
+        )
+        logger.info(
+            f"{ref}: {topology} behavioral macromodel (open-loop, vout={vout}, "
+            f"fsw={self._fmt_hz(params['FSW'])}); active load-step recovery is not "
+            f"modeled (open loop)"
+        )
+
     @staticmethod
     def _parse_frequency(value) -> Optional[float]:
         """Parse a GBW/frequency string ('1.4G', '10MEG', '1k', '5e5', '2MHz') to Hz.
@@ -2110,6 +2269,36 @@ class SpiceConverter:
                     f"{ref}: LDO has no resolvable output voltage; set "
                     f'Sim.Params="vout=3.3 vdrop=0.3" (or name a ModelLibrary '
                     f"entry with a VOUT param via value=)"
+                )
+
+        # 4c. Switching regulators: explicit topology + resolvable terminals/params.
+        for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
+            kind = self._kind(component)
+            ref = self._attr(component, "ref", None) or "?"
+            if kind == "switcher_unknown":
+                problems.append(
+                    f"{ref}: switching-regulator topology is ambiguous; set "
+                    f"Sim.Device=BUCK or Sim.Device=BOOST"
+                )
+                continue
+            if kind not in ("buck", "boost"):
+                continue
+            if (
+                getattr(component, "_pins", None) is not None
+                and self._switcher_terminals(component) is None
+            ):
+                problems.append(
+                    f"{ref}: {kind} needs connected SW, VIN and GND pins "
+                    f"(resolved by pin name)"
+                )
+            if self._switcher_params(
+                component, self._attr(component, "value", None), kind
+            ) is None:
+                problems.append(
+                    f'{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. '
+                    f'Sim.Params="fsw=500k vout=3.3"'
                 )
 
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
