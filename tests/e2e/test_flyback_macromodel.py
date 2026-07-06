@@ -95,8 +95,8 @@ def _flyback(xfmr_params="lp=100u n=0.5 k=1"):
         _connect_by_name(t1, "AB", sw)   # other end to the IC's drain
         _connect_by_name(t1, "SA", gnd)  # secondary dot to the return (flyback flip)
         _connect_by_name(t1, "SB", sec)  # rectifier feed
-        d1[1] += sec
-        d1[2] += out
+        d1[2] += sec  # A (anode) -> rectifier feed
+        d1[1] += out  # K (cathode) -> output
         cout[1] += out
         cout[2] += gnd
         rload[1] += out

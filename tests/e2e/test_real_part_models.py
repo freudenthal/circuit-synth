@@ -63,8 +63,8 @@ def _wire_rectifier(with_decorative):
     gnd = Net("GND")
     v1[1] += vin
     v1[2] += gnd
-    d1[1] += vin
-    d1[2] += out
+    d1[2] += vin  # A (anode) -> driven source (forward conduction vin -> out)
+    d1[1] += out  # K (cathode) -> output
     rl[1] += out
     rl[2] += gnd
     if with_decorative:

@@ -64,8 +64,8 @@ def _diode_circuit():
     v1[2] += gnd
     r1[1] += vin
     r1[2] += vn
-    d1[1] += vn
-    d1[2] += gnd
+    d1[2] += vn  # A (anode) -> forward-biased from vn to gnd
+    d1[1] += gnd  # K (cathode)
 
 
 def test_diode_emits_model_card():
@@ -239,8 +239,8 @@ def test_unresolved_model_raises():
         v1[2] += gnd
         r1[1] += vin
         r1[2] += vn
-        d1[1] += vn
-        d1[2] += gnd
+        d1[2] += vn  # A (anode)
+        d1[1] += gnd  # K (cathode)
 
     with pytest.raises(SimulationValidationError) as exc:
         SpiceConverter(bad()).convert()
@@ -265,8 +265,8 @@ def test_lenient_convert_skips_model_validation():
         v1[2] += gnd
         r1[1] += vin
         r1[2] += vn
-        d1[1] += vn
-        d1[2] += gnd
+        d1[2] += vn  # A (anode)
+        d1[1] += gnd  # K (cathode)
 
     netlist = str(SpiceConverter(bad()).convert(strict=False))
     assert "D1 " in netlist  # device line present

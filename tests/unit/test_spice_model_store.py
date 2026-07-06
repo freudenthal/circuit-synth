@@ -115,8 +115,8 @@ def test_store_model_preferred_over_datasheet_fit(tmp_path, monkeypatch):
         gnd = Net("GND")
         v1[1] += vin
         v1[2] += gnd
-        d1[1] += vin
-        d1[2] += out
+        d1[2] += vin  # A (anode): keeps DD1 VIN OUT node order, schematic-correct
+        d1[1] += out  # K (cathode)
         r1[1] += out
         r1[2] += gnd
 
@@ -147,8 +147,8 @@ def test_no_store_falls_back_to_datasheet_fit(tmp_path, monkeypatch):
         gnd = Net("GND")
         v1[1] += vin
         v1[2] += gnd
-        d1[1] += vin
-        d1[2] += out
+        d1[2] += vin  # A (anode): keeps DD1 VIN OUT node order, schematic-correct
+        d1[1] += out  # K (cathode)
         r1[1] += out
         r1[2] += gnd
 

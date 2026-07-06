@@ -175,8 +175,8 @@ def test_boost_regulates_with_uic():
         _connect_by_name(u1, "GND", gnd)
         l1[1] += vin
         l1[2] += sw
-        d1[1] += sw  # anode
-        d1[2] += out  # cathode
+        d1[2] += sw  # A (anode) -> switch node
+        d1[1] += out  # K (cathode) -> boost output
         cout[1] += out
         cout[2] += gnd
         rload[1] += out

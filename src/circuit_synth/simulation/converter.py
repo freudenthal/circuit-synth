@@ -854,7 +854,9 @@ class SpiceConverter:
             logger.info(f"{ref}: external subckt {name} from {base} ({source})")
         elif kind_in_file == "model":
             nodes = self._get_component_nodes(component)
-            self._emit_primitive_with_external_model(dev_kind, ref, name, nodes)
+            self._emit_primitive_with_external_model(
+                dev_kind, ref, name, nodes, component
+            )
             self.model_provenance[ref] = ResolvedModel(
                 ref, dev_kind or "?", "vendor_lib", name, source=source
             )
@@ -863,10 +865,17 @@ class SpiceConverter:
             # validate() reports this in strict mode; lenient mode just skips.
             logger.warning(f"{ref}: no usable model found in {path} - skipping")
 
-    def _emit_primitive_with_external_model(self, kind, ref, name, nodes) -> None:
+    def _emit_primitive_with_external_model(
+        self, kind, ref, name, nodes, component=None
+    ) -> None:
         """Emit a D/Q/M instance referencing an external ``.model`` name (no card)."""
         if kind == "diode" and len(nodes) >= 2:
-            self.spice_circuit.D(ref, nodes[0], nodes[1], model=name)
+            # Resolve A/K by pin name so a vendor-lib diode isn't reversed either
+            # (bug #12). component is None only for legacy callers -> positional.
+            if component is not None:
+                self._emit_diode(component, ref, name)
+            else:
+                self.spice_circuit.D(ref, nodes[0], nodes[1], model=name)
         elif kind == "bjt" and len(nodes) >= 3:
             self.spice_circuit.Q(ref, nodes[0], nodes[1], nodes[2], model=name)
         elif kind == "mosfet" and len(nodes) >= 3:
@@ -949,16 +958,80 @@ class SpiceConverter:
                     f"for: {', '.join(sorted(set(generics)))}"
                 )
 
-    def _add_diode(self, component, ref: str, value: str):
-        """Add diode to SPICE circuit."""
+    # Diode terminal pin names. KiCad Device:D/D_Schottky/D_Zener/LED all put
+    # K (cathode) on pin 1 and A (anode) on pin 2, so pin-number order is the
+    # reverse of SPICE's (anode, cathode) -- resolve by name instead (bug #12).
+    _DIODE_ANODE_NAMES = {"A", "A1", "AA", "+"}
+    _DIODE_CATHODE_NAMES = {"K", "K1", "KK", "-"}
+
+    def _diode_terminals(self, component):
+        """(anode_node, cathode_node) resolved by pin NAME, or None.
+
+        Returns None -- so ``_add_diode`` falls back to positional order -- when
+        there is no live pin map (dict/JSON circuits) or the connected pins don't
+        yield exactly one anode-named and one cathode-named terminal (unnamed or
+        multi-unit symbols). Only connected pins (``pin.net`` set) are considered.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return None
+        anode = cathode = None
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue
+            name = (getattr(pin, "name", "") or "").strip().upper()
+            node = self.node_map.get(net.name, net.name)
+            if name in self._DIODE_ANODE_NAMES:
+                if anode is not None:
+                    return None  # ambiguous
+                anode = node
+            elif name in self._DIODE_CATHODE_NAMES:
+                if cathode is not None:
+                    return None  # ambiguous
+                cathode = node
+        if anode is None or cathode is None:
+            return None
+        return anode, cathode
+
+    def _emit_diode(self, component, ref: str, model_name: str) -> bool:
+        """Emit one SPICE ``D`` card, terminals by A/K pin name, positional fallback.
+
+        SPICE ``D`` is (anode, cathode). Resolving by name means a
+        schematically-correct diode (KiCad pin 1 = K, pin 2 = A) simulates in the
+        right direction (bug #12). Falls back to pin-number order only when the
+        names can't be resolved -- and warns, so the fallback is never silent.
+        Shared by the built-in path (``_add_diode``) and the external-model path
+        (``_emit_primitive_with_external_model``). Returns False if the diode had
+        too few connections to emit.
+        """
+        terminals = self._diode_terminals(component)
+        if terminals is not None:
+            anode, cathode = terminals
+            self.spice_circuit.D(ref, anode, cathode, model=model_name)
+            logger.debug(
+                f"Added diode {ref}: A={anode} K={cathode} model={model_name} (by name)"
+            )
+            return True
+
         nodes = self._get_component_nodes(component)
         if len(nodes) < 2:
             logger.warning(f"Diode {ref} needs 2 connections, got {len(nodes)}")
-            return
-
-        model_name = self._resolve_device_model(component, ref) or "DefaultDiode"
+            return False
+        logger.warning(
+            f"Diode {ref}: pins not resolvable by A/K name; using pin-number "
+            f"order (pin1=anode). Verify polarity."
+        )
         self.spice_circuit.D(ref, nodes[0], nodes[1], model=model_name)
-        logger.debug(f"Added diode {ref}: {nodes[0]} -> {nodes[1]} model={model_name}")
+        logger.debug(
+            f"Added diode {ref}: {nodes[0]} -> {nodes[1]} model={model_name} (positional)"
+        )
+        return True
+
+    def _add_diode(self, component, ref: str, value: str):
+        """Add a built-in-model diode to the SPICE circuit (terminals by A/K name)."""
+        model_name = self._resolve_device_model(component, ref) or "DefaultDiode"
+        self._emit_diode(component, ref, model_name)
 
     # Ideal op-amp open-loop gain. Large enough that closed-loop behaviour is set
     # by the feedback network, frequency-independent (infinite GBW) so an active

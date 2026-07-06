@@ -67,8 +67,8 @@ def _diode_circuit(diode_value):
         gnd = Net("GND")
         v1[1] += vin
         v1[2] += gnd
-        d1[1] += vin
-        d1[2] += out
+        d1[2] += vin  # A (anode): keeps DD1 VIN OUT node order, schematic-correct
+        d1[1] += out  # K (cathode)
         r1[1] += out
         r1[2] += gnd
 
@@ -154,8 +154,8 @@ def test_sim_params_override_on_datasheet_base():
         gnd = Net("GND")
         v1[1] += vin
         v1[2] += gnd
-        d1[1] += vin
-        d1[2] += out
+        d1[2] += vin  # A (anode): keeps DD1 VIN OUT node order, schematic-correct
+        d1[1] += out  # K (cathode)
         r1[1] += out
         r1[2] += gnd
 

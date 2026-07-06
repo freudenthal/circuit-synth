@@ -232,8 +232,8 @@ def _flyback_circuit(sim_params="fsw=100k vout=5 n=0.5"):
         # feeds the rectifier. Secondary return shares the sim's GND.
         _connect_by_name(t1, "SA", gnd)
         _connect_by_name(t1, "SB", sec)
-        d1[1] += sec
-        d1[2] += out
+        d1[2] += sec  # A (anode) -> rectifier feed
+        d1[1] += out  # K (cathode) -> output
         cout[1] += out
         cout[2] += gnd
         rload[1] += out
