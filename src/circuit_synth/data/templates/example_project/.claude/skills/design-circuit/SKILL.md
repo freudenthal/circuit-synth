@@ -211,16 +211,38 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   steady-state output, ripple, and inductor stress, but has **no active load-step
   recovery** (a load step shows the passive LC settling), is **non-synchronous** (diode
   freewheel, so sync-rectifier efficiency is underestimated), and has **no current
-  limit**. `.ac` on it is meaningless (a PWM comparator has no small-signal
-  linearization — you'll get a warning); loop-gain/phase-margin needs the averaged
-  model (future work). **Boost** relies on your external rectifier diode (SW→OUT) and
-  inductor (VIN→SW), and needs `use_initial_condition=True` to converge. **Flyback and
-  other isolated/coupled-inductor topologies are not supported yet.**
+  limit**. `.ac` on this cycle-accurate model is meaningless (a PWM comparator has no
+  small-signal linearization — you'll get a warning); for loop-gain/phase-margin use
+  the **averaged** model below. **Boost** relies on your external rectifier diode
+  (SW→OUT) and inductor (VIN→SW), and needs `use_initial_condition=True` to converge.
+  **Flyback and other isolated/coupled-inductor topologies are not supported yet.**
   - **Measuring a switching result** (`SimulationResult` helpers): `average(node)` /
     `ripple_pp(node)` over the steady-state tail; `settling_time(node, final=...)`;
     `branch_current("L1")` for inductor current (saturation margin — pass the
     schematic ref). Efficiency: `Pout ≈ average("OUT")**2 / Rload`, `Pin ≈
     average_power("VIN", "Vsource")` (mind the source's current sign).
+- **Buck loop stability (averaged model + `.ac`)** — add `mode=avg` and a `vref`
+  (the controller's internal reference the divider tap regulates to) to a **buck**'s
+  `Sim.Params`, e.g. `Sim.Params="fsw=500k vout=3.3 vref=0.8 mode=avg"`. This swaps
+  the cycle-accurate model for an **averaged (non-switching) voltage-mode** model — a
+  gm-C error amp (`gm` default 1e-3, `cea` 1e-7, `rea` 1e6) + a continuous averaged
+  PWM switch — which **linearizes under `.ac`**, so you get a real loop gain. Measure
+  it by **voltage injection**: split the divider tap from the FB pin with a
+  `Simulation_SPICE:VSIN` (defaults `ac=1`; set `amplitude="0" offset="0"` so it's a
+  DC short), naming the divider-side net `FB_A` and the pin-side net `FB_B`:
+  ```python
+  # ...divider tap -> FB_A; VSIN FB_A->FB_B; U1 FB pin -> FB_B...
+  res = sim.ac_analysis(start_freq=10, stop_freq=1e6, points=100)
+  freq, mag_db, phase = res.loop_gain("FB_A", "FB_B")   # T = -V(FB_A)/V(FB_B)
+  pm = res.phase_margin("FB_A", "FB_B")   # deg, or None if no 0 dB crossing
+  gm = res.gain_margin("FB_A", "FB_B")    # dB,  or None if phase never hits -180
+  ```
+  Raising `cea` slows the loop (lower crossover, more phase margin). **Validity:** CCM
+  voltage-mode buck only; results above ~FSW/2 are not physical (averaging breaks);
+  the plain type-I integrator has no phase boost, so a stable design keeps its
+  crossover well below the LC resonance. For a quick stability *proxy* without the
+  averaged model, the cycle model's load-step transient (a `PWL` current load) shows
+  ringing/settling — use that when you only need "does it ring", not exact margins.
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);

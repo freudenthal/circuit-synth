@@ -288,6 +288,93 @@ class SimulationResult:
                 return float(10 ** (fa + t * (fb - fa)))
         return None
 
+    # -- loop-stability helpers (Stage 20.5) ------------------------------ #
+
+    def loop_gain(self, fb_a: str, fb_b: str):
+        """Loop gain ``T(f)`` from a voltage-injection AC run: ``(freq, mag_db, phase_deg)``.
+
+        The loop is broken by a ``Simulation_SPICE:VSIN`` (ac=1) inserted in series
+        between the divider tap ``fb_a`` (the loop *output* / plant-side node) and the
+        controller FB pin ``fb_b`` (the error-amp *input*), source polarity A->B. The
+        return ratio is then ``T = -V(fb_a)/V(fb_b)`` (the divider-tap response over
+        the pin excitation), which is high at DC and rolls off -- as a loop gain
+        should. Phase is unwrapped (deg).
+
+        Requires an averaged (``MODE=avg``) model -- the cycle-accurate model has no
+        meaningful small-signal linearization. Validity: injection is accurate where
+        the forward impedance greatly exceeds the backward impedance (true at a
+        high-impedance FB pin); this is single-injection, not the general
+        Middlebrook double-injection case.
+        """
+        import numpy as np
+
+        freq = self._frequency_array()
+        T = -self._complex_node(fb_a) / self._complex_node(fb_b)
+        mag_db = 20 * np.log10(np.abs(T))
+        phase_deg = np.unwrap(np.angle(T)) * 180.0 / np.pi
+        return freq, mag_db, phase_deg
+
+    def phase_margin(self, fb_a: str, fb_b: str) -> Optional[float]:
+        """Phase margin (degrees) at the first 0 dB gain crossover, or ``None``.
+
+        ``None`` when the loop gain never crosses 0 dB (report honestly rather than
+        fabricate a margin). See :meth:`loop_gain` for the injection setup and the
+        ``fb_a``/``fb_b`` (divider-tap / FB-pin) convention.
+        """
+        freq = self._frequency_array()
+        T = -self._complex_node(fb_a) / self._complex_node(fb_b)
+        return self._phase_margin_from(freq, T)
+
+    def gain_margin(self, fb_a: str, fb_b: str) -> Optional[float]:
+        """Gain margin (dB) at the first -180 deg phase crossing, or ``None``.
+
+        Positive = the loop gain is that many dB below 0 dB where the phase hits
+        -180 deg (stable). ``None`` when the phase never reaches -180 deg.
+        """
+        freq = self._frequency_array()
+        T = -self._complex_node(fb_a) / self._complex_node(fb_b)
+        return self._gain_margin_from(freq, T)
+
+    @staticmethod
+    def _phase_margin_from(freq, T) -> Optional[float]:
+        """Phase margin from a complex loop-gain array ``T`` over ``freq`` (ascending).
+
+        Finds the first downward 0 dB crossing, interpolates the (unwrapped) phase
+        there, and returns ``180 + phase``. ``None`` if no downward crossing.
+        """
+        import numpy as np
+
+        freq = np.asarray(freq, dtype=float)
+        T = np.asarray(T, dtype=complex)
+        mag_db = 20 * np.log10(np.abs(T))
+        phase = np.unwrap(np.angle(T)) * 180.0 / np.pi
+        for i in range(1, len(freq)):
+            a, b = mag_db[i - 1], mag_db[i]
+            if a >= 0.0 > b:  # crosses 0 dB going down
+                t = (0.0 - a) / (b - a)
+                ph = phase[i - 1] + t * (phase[i] - phase[i - 1])
+                return float(180.0 + ph)
+        return None
+
+    @staticmethod
+    def _gain_margin_from(freq, T) -> Optional[float]:
+        """Gain margin (dB) from a complex loop-gain array; ``None`` if phase never
+        crosses -180 deg. Interpolates the magnitude at the first -180 crossing and
+        returns its negation (dB below 0)."""
+        import numpy as np
+
+        freq = np.asarray(freq, dtype=float)
+        T = np.asarray(T, dtype=complex)
+        mag_db = 20 * np.log10(np.abs(T))
+        phase = np.unwrap(np.angle(T)) * 180.0 / np.pi
+        for i in range(1, len(freq)):
+            a, b = phase[i - 1], phase[i]
+            if a > -180.0 >= b:  # crosses -180 deg going down
+                t = (-180.0 - a) / (b - a)
+                m = mag_db[i - 1] + t * (mag_db[i] - mag_db[i - 1])
+                return float(-m)
+        return None
+
     # -- transient measurement helpers (Stage 20.3) ----------------------- #
 
     def _node_series(self, node: str):
@@ -565,17 +652,22 @@ class CircuitSimulator:
         options: Optional[Dict] = None,
     ) -> SimulationResult:
         """Run AC analysis."""
+        # The cycle-accurate buck/boost model has no meaningful small-signal
+        # linearization (a PWM comparator), so warn on .ac. The *averaged* model
+        # (MODE=avg, provenance name "*_averaged") is built precisely for .ac loop
+        # gain -- exclude it.
         switching = sorted(
             ref
             for ref, prov in self.model_provenance.items()
             if getattr(prov, "kind", None) in ("buck", "boost")
+            and "averaged" not in (getattr(prov, "name", "") or "")
         )
         if switching:
             logger.warning(
                 f"AC analysis on switching macromodel(s) {', '.join(switching)} is "
                 f"not meaningful: a PWM comparator has no small-signal linearization. "
-                f"Use transient_analysis; loop-gain/phase-margin needs an averaged "
-                f"model."
+                f"Use transient_analysis; loop-gain/phase-margin needs the averaged "
+                f"model (Sim.Params MODE=avg)."
             )
         simulator = self._make_simulator(temperature, options)
         analysis = simulator.ac(

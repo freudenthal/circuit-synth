@@ -1407,6 +1407,42 @@ class SpiceConverter:
             "VRAMP": g("VRAMP", 1.0),
         }
 
+    def _switcher_mode(self, component) -> str:
+        """Model variant for a switcher: ``'avg'`` (averaged, for loop stability)
+        or ``'cycle'`` (the default cycle-accurate 20.3 model).
+
+        Read from ``Sim.Params`` ``MODE=`` (case-insensitive); anything other than
+        ``avg`` -- including absent -- is ``cycle``.
+        """
+        raw = self._parse_sim_params(self._sim_props(component).get("params"))
+        return "avg" if str(raw.get("MODE", "")).strip().lower() == "avg" else "cycle"
+
+    def _averaged_params(self, component) -> Optional[dict]:
+        """Error-amp params for the averaged model, or None if VREF is missing.
+
+        VREF (the controller's internal reference the divider tap regulates to) is
+        required -- the averaged loop closes through the user's real divider, so the
+        output is set by VREF and that ratio, not by VOUT. GM (error-amp
+        transconductance), CEA (compensation cap) and REA (finite-DC-gain resistor)
+        default to a plain gm-C integrator and are the knobs the user tunes for
+        phase margin.
+        """
+        raw = self._parse_sim_params(self._sim_props(component).get("params"))
+        vref = self._parse_si_number(raw["VREF"]) if "VREF" in raw else None
+        if not vref or vref <= 0:
+            return None
+
+        def g(key, default):
+            v = self._parse_si_number(raw[key]) if key in raw else None
+            return v if v is not None else default
+
+        return {
+            "VREF": vref,
+            "GM": g("GM", 1e-3),
+            "CEA": g("CEA", 1e-7),
+            "REA": g("REA", 1e6),
+        }
+
     def _add_buck(self, component, ref: str, value: str):
         self._add_switching_regulator(component, ref, value, "buck")
 
@@ -1446,6 +1482,18 @@ class SpiceConverter:
                 f'(set Sim.Params="fsw=500k vout=3.3")'
             )
             return
+
+        # MODE=avg selects the averaged (non-switching) model for loop-stability
+        # analysis. v1 is voltage-mode buck only; boost falls back to the cycle
+        # model with a clear warning (honest, not silent).
+        if self._switcher_mode(component) == "avg":
+            if topology == "buck":
+                self._emit_averaged_buck(component, ref, term, params)
+                return
+            logger.warning(
+                f"{topology} {ref}: MODE=avg is voltage-mode-buck-only in v1; "
+                f"using the cycle-accurate model instead"
+            )
 
         sw, vin, gnd = str(term["sw"]), str(term["vin"]), str(term["gnd"])
         n = self._fmt_num
@@ -1489,6 +1537,79 @@ class SpiceConverter:
             f"{ref}: {topology} behavioral macromodel (open-loop, vout={vout}, "
             f"fsw={self._fmt_hz(params['FSW'])}); active load-step recovery is not "
             f"modeled (open loop)"
+        )
+
+    def _emit_averaged_buck(self, component, ref, term, params):
+        """Emit the averaged (non-switching) voltage-mode buck model (Stage 20.5).
+
+        Replaces the sawtooth/comparator/switch/diode of the cycle model with a
+        continuous averaged PWM switch and a linear gm-C error amplifier, so ``.ac``
+        linearizes it and produces a real loop gain (crossover / phase margin) --
+        the question the cycle-accurate model structurally cannot answer::
+
+            B<ref>_ea  <gnd> <ref>_c  I = GM*(VREF - V(<fb>))   ; error amp (integrator)
+            C<ref>_ea  <ref>_c <gnd> CEA                         ; compensation cap
+            R<ref>_ea  <ref>_c <gnd> REA                         ; finite DC gain
+            B<ref>_sw  <ref>_swi <gnd> V = V(<ref>_c) * V(<vin>) ; averaged switch (d=V(c))
+            R<ref>_sw  <ref>_swi <sw> RON_HS                     ; conduction loss
+
+        The control voltage V(c) *is* the duty (in 0..1 at the operating point of a
+        well-specified buck). The multiplicative averaged switch linearizes to a
+        d->vout gain of ~VIN around the DC operating point, so the user's real L /
+        Cout / divider supply the plant dynamics and the loop closes through the
+        divider tap. Negative feedback: Vout low -> V(fb) low -> error>0 -> V(c) up
+        -> duty up -> Vout up.
+
+        No duty clamp is emitted: it is irrelevant to the small-signal ``.ac`` this
+        model exists for, and a hard ``min/max`` saturation zeroes the Jacobian and
+        breaks DC operating-point convergence (the clamp hides the feedback path
+        from Newton during startup). Validity (documented, logged): CCM voltage-mode
+        only; results above ~FSW/2 are meaningless (averaging breaks); no current
+        limit.
+        """
+        avg = self._averaged_params(component)
+        if avg is None:
+            logger.warning(
+                f'buck {ref}: MODE=avg needs Sim.Params VREF (the reference the '
+                f'divider tap regulates to), e.g. "vref=0.8" - skipping'
+            )
+            return
+        fb = term.get("fb")
+        if fb is None:
+            logger.warning(
+                f"buck {ref}: MODE=avg needs a connected FB pin (the divider tap) "
+                f"to close the loop - skipping"
+            )
+            return
+
+        sw, vin, gnd = str(term["sw"]), str(term["vin"]), str(term["gnd"])
+        fb = str(fb)
+        n = self._fmt_num
+        vref, gm, cea, rea = (
+            n(avg["VREF"]),
+            n(avg["GM"]),
+            n(avg["CEA"]),
+            n(avg["REA"]),
+        )
+        ron = n(params["RON_HS"])
+        cc, swi = f"{ref}_c", f"{ref}_swi"
+
+        lines = [
+            f"B{ref}_ea {gnd} {cc} I = {gm}*({vref} - V({fb}))",
+            f"C{ref}_ea {cc} {gnd} {cea}",
+            f"R{ref}_ea {cc} {gnd} {rea}",
+            f"B{ref}_sw {swi} {gnd} V = V({cc}) * V({vin})",
+            f"R{ref}_sw {swi} {sw} {ron}",
+        ]
+        self.spice_circuit.raw_spice += "\n" + "\n".join(lines)
+        self.model_provenance[ref] = ResolvedModel(
+            ref, "buck", "sim_params", f"buck_averaged(vref={vref})"
+        )
+        fsw = params["FSW"]
+        logger.info(
+            f"{ref}: buck averaged macromodel (voltage-mode, CCM, vref={vref}, "
+            f"gm={gm}, cea={cea}); for loop-gain/phase-margin via .ac. Results above "
+            f"~{self._fmt_hz(fsw / 2)} (FSW/2) are not physical (averaging breaks)."
         )
 
     @staticmethod
