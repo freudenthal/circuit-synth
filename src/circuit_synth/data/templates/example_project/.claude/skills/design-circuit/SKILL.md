@@ -179,8 +179,14 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   the built-in model library when known; otherwise a device falls back to a
   textbook-generic model. The converter records which tier each device got in
   `sim.model_provenance[ref].tier` (`datasheet_fit` / `generic` / `vendor_lib`) and
-  logs it, so a generic is never silently passed off as the real part. Naming a
-  part the library can't resolve is a hard error (declare the model, don't guess).
+  logs it, so a generic is never silently passed off as the real part. **Schottky
+  rectifiers** (the usual PSU rectifier) are available by name: `value="SS14"` or
+  `value="1N5819"` (datasheet-fit), or `value="DefaultSchottky"` (generic low-Vf).
+  Naming a part the library can't resolve is a hard error — **unless** you also
+  give `Sim.Params`, in which case it degrades to the kind's generic
+  (`DefaultDiode`/`DefaultNPN`/`DefaultNMOS`) with your overrides applied and a
+  warning (tier `generic`), so an unlisted part can be param-fitted
+  (e.g. `value="SomeSchottky", Sim.Params="IS=1e-6 RS=0.05"`).
 - **Op-amps** default to an ideal VCVS (infinite gain-bandwidth), so feedback/source
   capacitance has no effect on simulated bandwidth or stability. For a bandwidth- or
   stability-sensitive design (e.g. a transimpedance amp with a large source cap) add

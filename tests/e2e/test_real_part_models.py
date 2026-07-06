@@ -103,6 +103,33 @@ def test_rectifier_forward_drop_is_datasheet_band():
     assert sim.model_provenance["D1"].name == "1N4148"
 
 
+@circuit(name="RectifierSS14")
+def _rectifier_ss14():
+    """Same half-wave rectifier but with the SS14 Schottky (Stage 22.5)."""
+    v1 = Component(
+        symbol="Simulation_SPICE:VSIN", ref="V1", value="10V", frequency="1k"
+    )
+    d1 = Component(symbol="Device:D_Schottky", ref="D1", value="SS14")
+    rl = Component(symbol="Device:R", ref="RL", value="1k")
+    vin, out, gnd = Net("VIN"), Net("OUT"), Net("GND")
+    v1[1] += vin
+    v1[2] += gnd
+    d1[2] += vin  # A (anode)
+    d1[1] += out  # K (cathode)
+    rl[1] += out
+    rl[2] += gnd
+
+
+def test_ss14_schottky_has_low_forward_drop():
+    """The SS14 Schottky rectifies with a Vf well below the 1N4148 silicon band."""
+    sim, out = _rectifier_peak(_rectifier_ss14)
+    vf = 10.0 - out.max()
+    assert 0.1 <= vf <= 0.55, f"Schottky Vf={vf:.3f} not in the low band"
+    assert out.min() > -0.5  # reverse half blocked
+    assert sim.model_provenance["D1"].tier == "datasheet_fit"
+    assert sim.model_provenance["D1"].name == "SS14"
+
+
 def test_sim_enable_decorative_part_is_transparent():
     """A Sim.Enable=0 decorative part validates, is excluded, and changes nothing.
 

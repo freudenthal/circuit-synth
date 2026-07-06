@@ -101,6 +101,84 @@ def test_empty_diode_falls_back_to_generic():
     assert prov.name == "DefaultDiode"
 
 
+# --------------------------------------------------------------------------- #
+# Stage 22.5: Schottky models + Sim.Params fallback for unresolved names.
+# --------------------------------------------------------------------------- #
+
+
+def _schottky_circuit(diode_value, sim_params=None):
+    props = {}
+    if sim_params is not None:
+        props["Sim.Params"] = sim_params
+
+    @circuit(name="SchottkyCkt")
+    def cir():
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5V")
+        d1 = Component(
+            symbol="Device:D_Schottky", ref="D1", value=diode_value, **props
+        )
+        r1 = Component(symbol="Device:R", ref="R1", value="1k")
+        vin, out, gnd = Net("VIN"), Net("OUT"), Net("GND")
+        v1[1] += vin
+        v1[2] += gnd
+        d1[2] += vin  # A (anode)
+        d1[1] += out  # K (cathode)
+        r1[1] += out
+        r1[2] += gnd
+
+    return cir()
+
+
+@needs_pyspice
+@pytest.mark.parametrize("part", ["SS14", "1N5819"])
+def test_schottky_named_part_resolves_datasheet_fit(part):
+    conv = _converter(_schottky_circuit(part))
+    netlist = str(conv.convert())
+    assert f".model {part} D" in netlist
+    assert f"DD1 VIN OUT {part}" in netlist
+    prov = conv.model_provenance["D1"]
+    assert prov.tier == "datasheet_fit" and prov.name == part
+
+
+@needs_pyspice
+def test_default_schottky_is_generic():
+    conv = _converter(_schottky_circuit("DefaultSchottky"))
+    netlist = str(conv.convert())
+    assert ".model DefaultSchottky D" in netlist
+    prov = conv.model_provenance["D1"]
+    assert prov.tier == "generic" and prov.name == "DefaultSchottky"
+
+
+@needs_pyspice
+def test_unresolved_name_with_params_falls_back_to_generic(caplog):
+    """An unknown value + Sim.Params degrades to DefaultDiode + overrides, not error."""
+    import logging
+
+    conv = _converter(_schottky_circuit("NoSuchDiode9000", sim_params="IS=2e-6"))
+    with caplog.at_level(logging.WARNING, logger="circuit_synth.simulation.converter"):
+        netlist = str(conv.convert())  # validates strictly + emits
+    # Derived per-ref card off the generic, carrying the override.
+    assert ".model DefaultDiode_D1 D" in netlist
+    assert "DD1 VIN OUT DefaultDiode_D1" in netlist
+    assert "2e-06" in netlist or "2e-6" in netlist  # IS override reached the card
+    prov = conv.model_provenance["D1"]
+    assert prov.tier == "generic" and prov.overridden is True
+    assert any(
+        "not in library" in r.getMessage() and "NoSuchDiode9000" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@needs_pyspice
+def test_unresolved_name_without_params_still_errors():
+    """Regression guard: an unknown value with NO Sim.Params stays a hard error."""
+    from circuit_synth.simulation.converter import SimulationValidationError
+
+    with pytest.raises(SimulationValidationError) as exc:
+        _converter(_schottky_circuit("NoSuchDiode9000")).convert()
+    assert "NoSuchDiode9000" in str(exc.value)
+
+
 @needs_pyspice
 def test_named_bjt_resolves_datasheet_fit():
     """value='2N3904' resolves to the library NPN card."""

@@ -67,10 +67,23 @@ class SpiceConverter:
     # ``_emit_models``). Params are deliberately generic (textbook silicon values).
     GENERIC_MODELS = {
         "DefaultDiode": ("D", {"IS": 1e-14, "RS": 0.1, "N": 1.0, "CJO": 2e-12}),
+        "DefaultSchottky": (
+            "D",
+            {"IS": 1e-6, "RS": 0.05, "N": 1.05, "CJO": 100e-12, "BV": 40, "IBV": 1e-3},
+        ),
         "DefaultNPN": ("NPN", {"BF": 100, "IS": 1e-14, "VAF": 100}),
         "DefaultPNP": ("PNP", {"BF": 100, "IS": 1e-14, "VAF": 100}),
         "DefaultNMOS": ("NMOS", {"VTO": 1.0, "KP": 2e-5, "LAMBDA": 0.02}),
         "DefaultPMOS": ("PMOS", {"VTO": -1.0, "KP": 2e-5, "LAMBDA": 0.02}),
+    }
+
+    # Per-kind generic fallback: an unresolved model NAME carrying Sim.Params
+    # degrades to this generic + the overrides (rather than a hard error), so an
+    # unknown part can be param-fitted into a usable model (bug #11).
+    _KIND_GENERIC = {
+        "diode": "DefaultDiode",
+        "bjt": "DefaultNPN",
+        "mosfet": "DefaultNMOS",
     }
 
     # A bare device-type keyword in ``value`` selects the matching generic model,
@@ -606,6 +619,26 @@ class SpiceConverter:
         overrides = self._parse_sim_params(self._sim_props(component).get("params"))
 
         if spec is None:
+            # An unknown model name carrying Sim.Params is NOT a dead end: fall
+            # back to the kind's generic and overlay the overrides as a derived
+            # card, so an unlisted part can be param-fitted (bug #11). With NO
+            # overrides this stays a hard, loud validation error (below).
+            if overrides and kind in self._KIND_GENERIC:
+                generic = self._KIND_GENERIC[kind]
+                device_type, gparams = self.GENERIC_MODELS[generic]
+                merged = dict(gparams)
+                for key, val in overrides.items():
+                    merged[key] = self._coerce_param(val)
+                derived = f"{generic}_{ref}"
+                self.derived_models[derived] = (device_type, merged)
+                self.model_provenance[ref] = ResolvedModel(
+                    ref, kind, "generic", f"{base}->{generic}", overridden=True
+                )
+                logger.warning(
+                    f"{ref}: model '{base}' not in library; simulating as "
+                    f"{generic} + Sim.Params overrides (tier=generic)"
+                )
+                return derived
             self.model_provenance[ref] = ResolvedModel(ref, kind, "unresolved", base)
             return base
 
@@ -2762,6 +2795,12 @@ class SpiceConverter:
             kind = self._kind(component)
             spec, _tier = self._lookup_model_spec(model, kind)
             if spec is not None:
+                continue
+            # An unresolved base carrying Sim.Params degrades to the kind's generic
+            # + overrides (see _resolve_device_model), so it is simulatable -- not an
+            # error. With no overrides it stays a hard error below.
+            overrides = self._parse_sim_params(self._sim_props(component).get("params"))
+            if overrides and kind in self._KIND_GENERIC:
                 continue
             ref = self._attr(component, "ref", None) or "?"
             # Distinguish a device-type mismatch from an entirely unknown name.
