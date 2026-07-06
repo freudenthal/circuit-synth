@@ -36,6 +36,10 @@ def test_sim_device_transformer_kinds():
     assert SpiceConverter._SIM_DEVICE_KINDS.get("XFMR") == "transformer"
 
 
+def test_sim_device_flyback_kind():
+    assert SpiceConverter._SIM_DEVICE_KINDS.get("FLYBACK") == "flyback"
+
+
 # --- Fixtures ----------------------------------------------------------------
 
 
@@ -169,3 +173,128 @@ def test_transformer_unconnected_pin_is_validation_error():
         _netlist(_xfmr_circuit(wire_all=False))
     msg = str(exc.value)
     assert "T1" in msg and ("pin" in msg.lower() or "connected" in msg.lower())
+
+
+# --- 21.2 flyback macromodel --------------------------------------------------
+
+
+def _switching_symbol():
+    for sym in (
+        "Regulator_Switching:TPS62130",
+        "Regulator_Switching:LM2596S-3.3",
+    ):
+        try:
+            Component(symbol=sym, ref="U1")
+            return sym
+        except Exception:
+            continue
+    return None
+
+
+SW_SYM = _switching_symbol()
+needs_flyback_symbols = pytest.mark.skipif(
+    SW_SYM is None or not _symbols_available(),
+    reason="no KiCad Regulator_Switching / Transformer symbol available",
+)
+
+
+def _flyback_circuit(sim_params="fsw=100k vout=5 n=0.5"):
+    """The full flyback shape: IC macromodel + real transformer/rectifier/output."""
+
+    @circuit(name="flyback_unit")
+    def _c():
+        u1 = Component(
+            symbol=SW_SYM,
+            ref="U1",
+            **{"Sim.Device": "FLYBACK", "Sim.Params": sim_params},
+        )
+        t1 = Component(
+            symbol="Device:Transformer_1P_1S",
+            ref="T1",
+            **{"Sim.Params": "lp=100u n=0.5"},
+        )
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="12")
+        d1 = Component(symbol="Device:D", ref="D1")
+        cout = Component(symbol="Device:C", ref="C1", value="220u")
+        rload = Component(symbol="Device:R", ref="RL", value="5")
+        vin, sw, sec, out, gnd = (
+            Net("VIN"), Net("SW"), Net("SEC"), Net("OUT"), Net("GND"),
+        )
+        v1[1] += vin
+        v1[2] += gnd
+        _connect_by_name(u1, "VIN", vin)
+        _connect_by_name(u1, "SW", sw)
+        _connect_by_name(u1, "GND", gnd)
+        # Primary dot (AA) to VIN, other end to the IC's SW (drain).
+        _connect_by_name(t1, "AA", vin)
+        _connect_by_name(t1, "AB", sw)
+        # Flyback polarity by wiring: secondary dot (SA) to the return, SB
+        # feeds the rectifier. Secondary return shares the sim's GND.
+        _connect_by_name(t1, "SA", gnd)
+        _connect_by_name(t1, "SB", sec)
+        d1[1] += sec
+        d1[2] += out
+        cout[1] += out
+        cout[2] += gnd
+        rload[1] += out
+        rload[2] += gnd
+
+    return _c()
+
+
+@needs_flyback_symbols
+def test_flyback_emits_low_side_switch_and_clamp():
+    lines = _netlist(_flyback_circuit())
+    low = [ln.lower() for ln in lines]
+    assert any("u1_saw" in ln and "pulse" in ln for ln in low), lines  # PWM ramp
+    # Duty: (VOUT+VF)/((VOUT+VF) + N*V(vin)) -- the N*V(vin) product is the tell.
+    duty = next((ln for ln in low if ln.startswith("bu1_d ")), None)
+    assert duty is not None and "0.5*v(vin)" in duty.replace(" ", ""), lines
+    assert any(ln.startswith("su1_ls ") for ln in low), lines  # low-side switch
+    # Drain avalanche clamp with the default 150 V breakdown.
+    assert any(ln.startswith("du1_cl ") for ln in low), lines
+    clamp_model = next((ln for ln in low if ln.startswith(".model dclu1 ")), None)
+    assert clamp_model is not None and "bv=150" in clamp_model.replace(" ", ""), lines
+    # No freewheel diode (that is the buck's element; the rectifier is the user's).
+    assert not any(ln.startswith("du1_fw ") for ln in low), lines
+
+
+@needs_flyback_symbols
+def test_flyback_vclamp_override():
+    lines = _netlist(_flyback_circuit(sim_params="fsw=100k vout=5 n=0.5 vclamp=650"))
+    low = [ln.lower() for ln in lines]
+    clamp_model = next(ln for ln in low if ln.startswith(".model dclu1 "))
+    assert "bv=650" in clamp_model.replace(" ", "")
+
+
+@needs_flyback_symbols
+def test_flyback_missing_n_is_validation_error():
+    with pytest.raises(SimulationValidationError) as exc:
+        _netlist(_flyback_circuit(sim_params="fsw=100k vout=5"))
+    msg = str(exc.value)
+    assert "U1" in msg and "turns" in msg.lower()
+
+
+@needs_flyback_symbols
+def test_flyback_provenance_openloop():
+    conv = SpiceConverter(_flyback_circuit())
+    conv.convert()
+    prov = conv.model_provenance.get("U1")
+    assert prov is not None and prov.kind == "flyback", prov
+    assert "flyback_openloop" in prov.name.lower(), prov
+
+
+@needs_flyback_symbols
+def test_flyback_mode_avg_falls_back_to_cycle(caplog):
+    """MODE=avg stays voltage-mode-buck-only: flyback warns + emits the cycle model."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        lines = _netlist(
+            _flyback_circuit(sim_params="fsw=100k vout=5 n=0.5 mode=avg")
+        )
+    low = [ln.lower() for ln in lines]
+    assert any("pulse" in ln for ln in low), lines  # cycle model emitted
+    assert not any(ln.startswith("bu1_ea ") for ln in low), lines  # no averaged EA
+    assert any("mode=avg" in r.message.lower() or "buck-only" in r.message.lower()
+               for r in caplog.records)

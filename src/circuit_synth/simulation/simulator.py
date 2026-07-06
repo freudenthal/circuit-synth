@@ -659,7 +659,7 @@ class CircuitSimulator:
         switching = sorted(
             ref
             for ref, prov in self.model_provenance.items()
-            if getattr(prov, "kind", None) in ("buck", "boost")
+            if getattr(prov, "kind", None) in ("buck", "boost", "flyback")
             and "averaged" not in (getattr(prov, "name", "") or "")
         )
         if switching:

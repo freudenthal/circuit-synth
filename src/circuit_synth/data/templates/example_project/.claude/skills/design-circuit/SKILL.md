@@ -214,8 +214,10 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   limit**. `.ac` on this cycle-accurate model is meaningless (a PWM comparator has no
   small-signal linearization — you'll get a warning); for loop-gain/phase-margin use
   the **averaged** model below. **Boost** relies on your external rectifier diode
-  (SW→OUT) and inductor (VIN→SW), and needs `use_initial_condition=True` to converge.
-  **Flyback and other isolated/coupled-inductor topologies are not supported yet.**
+  (SW→OUT) and inductor (VIN→SW), and needs `use_initial_condition=True` to converge
+  (start `initial_conditions={"OUT": <vin>}`). **Flyback is supported — see the
+  flyback bullet below.** Forward/half-bridge/LLC and **multi-winding transformers
+  are not simulatable yet** — say so rather than approximating.
   - **Measuring a switching result** (`SimulationResult` helpers): `average(node)` /
     `ripple_pp(node)` over the steady-state tail; `settling_time(node, final=...)`;
     `branch_current("L1")` for inductor current (saturation margin — pass the
@@ -255,6 +257,20 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   net (or bridge it with a large resistor) — this is a simulation artifact, not a
   design change. Lower `k` (leakage) is realistic but makes transients slow and
   spiky; `k=1` is the fast idealization.
+- **Flyback converters** — `Sim.Device="FLYBACK"` on the controller IC emits the
+  open-loop computed-duty macromodel (CCM duty `D=(VOUT+VF)/((VOUT+VF)+N·VIN)`) with
+  a **low-side switch** and a **drain avalanche clamp** (`vclamp` default 150 V — set
+  it to the IC's rating, e.g. 650 for offline parts; it bounds the leakage spike the
+  way a real integrated switch does). `Sim.Params="fsw=100k vout=5 n=0.5"` — `n` is
+  the transformer turns ratio Ns/Np and is **required** (it can't be read from the
+  separate transformer part; keep it equal to the transformer's `n`). Wiring: primary
+  dot AA→VIN, AB→the IC's SW pin; secondary dot SA→secondary return, SB→rectifier
+  anode; use a Schottky rectifier (`Sim.Params="IS=1e-6"` on a `Device:D`) so the
+  real diode drop matches the model's `vf`≈0.45 correction. Runs need
+  `use_initial_condition=True, initial_conditions={"OUT": 0}` (no DC op point for
+  open-loop PWM) and a step ≤ 1/50 of the switching period. **Limitations:** CCM duty
+  formula (light-load/DCM reads high), open loop (no load-step recovery),
+  non-synchronous, no current limit; clamp dissipation modeled but not reported.
 - **Simulation-only model controls (KiCad `Sim.*`, passed as component kwargs):**
   `Sim.Enable="0"` excludes a part from simulation (its symbol/footprint stay put —
   use it for connectors/test points so `validate()` doesn't flag them);

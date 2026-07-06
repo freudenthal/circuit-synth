@@ -351,6 +351,7 @@ class SpiceConverter:
         "LDO": "ldo",
         "BUCK": "buck",
         "BOOST": "boost",
+        "FLYBACK": "flyback",
         "TRANSFORMER": "transformer",
         "XFMR": "transformer",
     }
@@ -450,6 +451,7 @@ class SpiceConverter:
             "ldo": self._add_ldo,
             "buck": self._add_buck,
             "boost": self._add_boost,
+            "flyback": self._add_flyback,
             "transformer": self._add_transformer,
             "bjt": self._add_bjt_transistor,
             "mosfet": self._add_mosfet,
@@ -1484,10 +1486,13 @@ class SpiceConverter:
         return {"sw": sw, "vin": vin, "gnd": gnd, "fb": fb}
 
     def _switcher_params(self, component, value, topology) -> Optional[dict]:
-        """Macromodel params for a switcher, or None if VOUT/FSW can't be resolved.
+        """Macromodel params for a switcher, or None if a required one is missing.
 
-        VOUT (target output) and FSW (switching frequency) are required; VF (diode
-        drop used for the first-order duty correction), DMAX, RON_HS and VRAMP take
+        VOUT (target output) and FSW (switching frequency) are required; a flyback
+        additionally requires N (the transformer turns ratio Ns/Np -- the CCM duty
+        needs it, and it cannot be read from the separate transformer component).
+        VF (diode drop used for the first-order duty correction), DMAX, RON_HS,
+        VRAMP and VCLAMP (the flyback's emitted drain-clamp breakdown) take
         defaults. All parsed with the milli-aware SI parser.
         """
         raw = self._parse_sim_params(self._sim_props(component).get("params"))
@@ -1500,7 +1505,7 @@ class SpiceConverter:
             v = self._parse_si_number(raw[key]) if key in raw else None
             return v if v is not None else default
 
-        return {
+        params = {
             "VOUT": vout,
             "FSW": fsw,
             "VF": g("VF", 0.45),
@@ -1508,6 +1513,13 @@ class SpiceConverter:
             "RON_HS": g("RON_HS", 0.1),
             "VRAMP": g("VRAMP", 1.0),
         }
+        if topology == "flyback":
+            n_ratio = self._parse_si_number(raw["N"]) if "N" in raw else None
+            if not n_ratio or n_ratio <= 0:
+                return None
+            params["N"] = n_ratio
+            params["VCLAMP"] = g("VCLAMP", 150.0)
+        return params
 
     def _switcher_mode(self, component) -> str:
         """Model variant for a switcher: ``'avg'`` (averaged, for loop stability)
@@ -1551,25 +1563,34 @@ class SpiceConverter:
     def _add_boost(self, component, ref: str, value: str):
         self._add_switching_regulator(component, ref, value, "boost")
 
+    def _add_flyback(self, component, ref: str, value: str):
+        self._add_switching_regulator(component, ref, value, "flyback")
+
     def _add_switching_regulator(self, component, ref, value, topology):
-        """Emit a behavioral buck/boost macromodel replacing only the IC.
+        """Emit a behavioral buck/boost/flyback macromodel replacing only the IC.
 
         v1 is a **computed-duty open-loop** model (the closed loop was found to
         limit-cycle in voltage mode; open-loop is robust and steady-state-accurate):
 
           * a sawtooth PWM ramp at FSW,
           * a duty from VOUT/VIN with a first-order diode-drop correction (buck:
-            ``D=(VOUT+VF)/(VIN+VF)``; boost: ``D=1-VIN/(VOUT+VF)``) -- tracks line,
-            not load,
+            ``D=(VOUT+VF)/(VIN+VF)``; boost: ``D=1-VIN/(VOUT+VF)``; flyback CCM:
+            ``D=(VOUT+VF)/((VOUT+VF)+N*VIN)``) -- tracks line, not load,
           * a comparator gating an ``S`` switch (buck: high-side + emitted freewheel
-            diode; boost: low-side, relying on the user's external rectifier diode).
+            diode; boost/flyback: low-side, relying on the user's external rectifier
+            diode). A flyback additionally gets a **drain avalanche clamp** diode
+            (``BV=VCLAMP``, default 150 V): without it, transformer leakage dumped
+            into the ideal open switch rings to kV and ~30x-inflates the timepoint
+            count -- a real integrated flyback switch avalanches at its rating.
 
-        The inductor, output cap and feedback divider stay the user's real parts.
-        Emitted via ``raw_spice`` (behavioral sources + a switch + ``.model`` cards).
-        Limitations (documented, not silently hidden): no active load-step recovery
-        (open loop), non-synchronous (diode Vf, so sync-rectifier efficiency is
-        underestimated), no current limit. Boost needs UIC to converge (start V(out)
-        at V(in)); buck converges without it.
+        The inductor/transformer, output cap and feedback divider stay the user's
+        real parts. Emitted via ``raw_spice`` (behavioral sources + a switch +
+        ``.model`` cards). Limitations (documented, not silently hidden): no active
+        load-step recovery (open loop), non-synchronous (diode Vf, so sync-rectifier
+        efficiency is underestimated), no current limit; the flyback duty is the CCM
+        formula (light-load/DCM reads high) and clamp dissipation is modeled but not
+        reported as loss. Boost and flyback need UIC to converge (boost: start
+        V(out) at V(in); flyback: start V(out) at 0); buck converges without it.
         """
         term = self._switcher_terminals(component)
         if term is None:
@@ -1579,9 +1600,16 @@ class SpiceConverter:
             return
         params = self._switcher_params(component, value, topology)
         if params is None:
+            need = (
+                "VOUT/FSW/N" if topology == "flyback" else "VOUT/FSW"
+            )
+            example = (
+                'fsw=100k vout=5 n=0.5' if topology == "flyback"
+                else 'fsw=500k vout=3.3'
+            )
             logger.warning(
-                f'{topology} {ref}: no VOUT/FSW resolved - skipping '
-                f'(set Sim.Params="fsw=500k vout=3.3")'
+                f'{topology} {ref}: no {need} resolved - skipping '
+                f'(set Sim.Params="{example}")'
             )
             return
 
@@ -1609,8 +1637,10 @@ class SpiceConverter:
 
         if topology == "buck":
             duty = f"({vout}+{vf})/(V({vin})+{vf})"
-        else:
+        elif topology == "boost":
             duty = f"1 - V({vin})/({vout}+{vf})"
+        else:  # flyback CCM: VOUT = VIN*N*D/(1-D), first-order diode correction
+            duty = f"({vout}+{vf})/(({vout}+{vf}) + {n(params['N'])}*V({vin}))"
 
         lines = [
             f"V{ref}_saw {saw} {gnd} PULSE(0 {vramp} 0 "
@@ -1625,20 +1655,35 @@ class SpiceConverter:
                 f"D{ref}_fw {gnd} {sw} DFW{ref}",
                 f".model DFW{ref} D(IS=1e-9 N=1.05 CJO=100p)",
             ]
-        else:  # boost: low-side switch; user's schematic supplies L + rectifier D
+        else:  # boost/flyback: low-side switch; the rectifier diode is the user's
             lines += [
                 f"S{ref}_ls {sw} {gnd} {gg} {gnd} SW{ref}",
                 f".model SW{ref} SW(Ron={ron} Roff=1e6 Vt=2.5 Vh=0.2)",
             ]
+        if topology == "flyback":
+            # Drain avalanche clamp: bounds the leakage spike at the IC's rated
+            # breakdown, exactly as an integrated flyback switch does.
+            vclamp = n(params["VCLAMP"])
+            lines += [
+                f"D{ref}_cl {gnd} {sw} DCL{ref}",
+                f".model DCL{ref} D(IS=1e-12 BV={vclamp} IBV=1m)",
+            ]
 
         self.spice_circuit.raw_spice += "\n" + "\n".join(lines)
-        self.model_provenance[ref] = ResolvedModel(
-            ref, topology, "sim_params", f"{topology}_openloop(vout={vout})"
+        name = f"{topology}_openloop(vout={vout})"
+        if topology == "flyback":
+            name = f"flyback_openloop(vout={vout}, n={n(params['N'])})"
+        self.model_provenance[ref] = ResolvedModel(ref, topology, "sim_params", name)
+        extra = (
+            f"; drain clamp at BV={n(params['VCLAMP'])} V (set vclamp= to the IC's "
+            f"rating); CCM duty formula (light-load/DCM reads high)"
+            if topology == "flyback"
+            else ""
         )
         logger.info(
             f"{ref}: {topology} behavioral macromodel (open-loop, vout={vout}, "
             f"fsw={self._fmt_hz(params['FSW'])}); active load-step recovery is not "
-            f"modeled (open loop)"
+            f"modeled (open loop){extra}"
         )
 
     def _emit_averaged_buck(self, component, ref, term, params):
@@ -2506,7 +2551,7 @@ class SpiceConverter:
                     f"Sim.Device=BUCK or Sim.Device=BOOST"
                 )
                 continue
-            if kind not in ("buck", "boost"):
+            if kind not in ("buck", "boost", "flyback"):
                 continue
             if (
                 getattr(component, "_pins", None) is not None
@@ -2519,10 +2564,17 @@ class SpiceConverter:
             if self._switcher_params(
                 component, self._attr(component, "value", None), kind
             ) is None:
-                problems.append(
-                    f'{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. '
-                    f'Sim.Params="fsw=500k vout=3.3"'
-                )
+                if kind == "flyback":
+                    problems.append(
+                        f'{ref}: flyback needs Sim.Params with VOUT, FSW and N '
+                        f'(the transformer turns ratio Ns/Np), e.g. '
+                        f'Sim.Params="fsw=100k vout=5 n=0.5"'
+                    )
+                else:
+                    problems.append(
+                        f'{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. '
+                        f'Sim.Params="fsw=500k vout=3.3"'
+                    )
 
         # 4d. Transformers: all four winding ends connected + resolvable params.
         for component in self._iter_components():
