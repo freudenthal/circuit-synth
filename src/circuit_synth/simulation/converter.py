@@ -1358,6 +1358,40 @@ class SpiceConverter:
         """Compact numeric literal for a netlist ('3.3', '0.002', not '0.0020000')."""
         return f"{x:g}"
 
+    def _stub_unmodeled_pins(self, component, ref, modeled_nodes, gnd) -> None:
+        """Tie each connected-but-unmodeled pin's node to ground through 1 GOhm.
+
+        A macromodel drives only its resolved terminals; a real part's other pins
+        (NR/SS/BYP/COMP/EN...) remain plain nodes. If such a node's net is cap-only
+        (the usual decoupling), it has NO DC path, so ngspice's op-point solve hits
+        a ``singular matrix`` on it (bug #16). A 1 GOhm resistor to ground gives the
+        node a DC path at ~nA leakage -- harmless whether the net is cap-only,
+        driven (an EN header), or resistor-loaded.
+
+        ``modeled_nodes`` are the SPICE nodes the macromodel already uses; those and
+        the ground node are skipped, and each remaining node is stubbed once (a pin
+        group all tapping one node -- e.g. several pads on OUT -- yields no stub). No
+        live pin map (dict/JSON circuits) -> no stubs.
+        """
+        pin_map = getattr(component, "_pins", None)
+        if not isinstance(pin_map, dict):
+            return
+        skip = {str(n) for n in modeled_nodes if n is not None} | {str(gnd)}
+        stubbed = set()
+        lines = []
+        for pin in pin_map.values():
+            net = getattr(pin, "net", None)
+            if net is None:
+                continue
+            node = str(self.node_map.get(net.name, net.name))
+            if node in skip or node in stubbed:
+                continue
+            stubbed.add(node)
+            lines.append(f"R{ref}_stub{len(stubbed)} {node} {gnd} 1e9")
+            logger.debug(f"{ref}: 1G stub on unmodeled pin net {node}")
+        if lines:
+            self.spice_circuit.raw_spice += "\n" + "\n".join(lines)
+
     def _add_ldo(self, component, ref: str, value: str):
         """Add a linear regulator as a datasheet-parameterized behavioral macromodel.
 
@@ -1412,6 +1446,9 @@ class SpiceConverter:
         )
         self.spice_circuit.R(f"{ref}_ser", reg, nout, rser)
         self.spice_circuit.raw_spice += f"\nB{ref}_iq {inn} {gnd} I = {iq}"
+
+        # Give cap-only unmodeled pins (NR/BYP/EN...) a DC path so the op-point solves.
+        self._stub_unmodeled_pins(component, ref, {nin, nout, ngnd}, gnd)
 
         self.model_provenance[ref] = ResolvedModel(
             ref=ref,
@@ -1685,6 +1722,15 @@ class SpiceConverter:
                 f'(set Sim.Params="{example}")'
             )
             return
+
+        # Give cap-only unmodeled pins (SS/BYP/EN/PG...) a DC path so the op-point
+        # solves. Done before the MODE branch so both models get the stubs.
+        self._stub_unmodeled_pins(
+            component,
+            ref,
+            {term["sw"], term["vin"], term["gnd"], term["fb"]},
+            term["gnd"],
+        )
 
         # MODE=avg selects the averaged (non-switching) model for loop-stability
         # analysis. v1 is voltage-mode buck only; boost falls back to the cycle

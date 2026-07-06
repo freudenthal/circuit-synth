@@ -94,3 +94,45 @@ def test_ldo_provenance_is_sim_params_tier():
     sim, _vin, _vout = _sweep()
     prov = sim.model_provenance.get("U1")
     assert prov is not None and prov.kind == "ldo" and prov.tier == "sim_params", prov
+
+
+# --------------------------------------------------------------------------- #
+# Stage 22.4: an NR (cap-only) pin no longer needs an rshunt op-point option.  #
+# --------------------------------------------------------------------------- #
+
+
+@circuit(name="ldo_nr_oppoint")
+def _ldo_with_nr():
+    """32.5 V -> TPS7A4701 (vout=5) with a 10 nF NR cap to GND, a 1k load.
+
+    NR is a cap-only node: without the converter's 1 GOhm stub its op-point solve
+    hits ``singular matrix: check node ...`` (run-3 bug #16, worked around then with
+    operating_point(options={'rshunt': 1e9})).
+    """
+    u1 = Component(
+        symbol="Regulator_Linear:TPS7A4701xRGW",
+        ref="U1",
+        **{"Sim.Device": "LDO", "Sim.Params": "vout=5 vdrop=0.3 rser=0.05 iq=1m"},
+    )
+    v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="32.5")
+    cnr = Component(symbol="Device:C", ref="C1", value="10n")
+    rl = Component(symbol="Device:R", ref="RL", value="1k")
+    vin, vout, gnd, nr = Net("VIN"), Net("VOUT"), Net("GND"), Net("LDO_NR")
+    v1[1] += vin
+    v1[2] += gnd
+    u1[15] += vin  # IN
+    u1[1] += vout  # OUT
+    u1[7] += gnd  # GND
+    u1[14] += nr  # NR (cap-only)
+    cnr[1] += nr
+    cnr[2] += gnd
+    rl[1] += vout
+    rl[2] += gnd
+
+
+def test_ldo_nr_pin_op_point_converges_without_rshunt():
+    """operating_point() with NO rshunt option converges and OUT reads ~vout."""
+    sim = _ldo_with_nr().simulate()
+    res = sim.operating_point()  # no options -- the stub supplies the DC path
+    vout = float(np.real(res.get_voltage("VOUT")))
+    assert 4.9 < vout < 5.05, vout
