@@ -143,3 +143,57 @@ def test_buck_load_step_settles():
     res = sim.transient_analysis(step_time=20e-9, end_time=3e-3)
     final = res.average("OUT", tail_frac=0.1)
     assert 3.0 < final < 3.5, f"post-step Vout={final}"
+
+
+def test_boost_regulates_with_uic():
+    """Live boost acceptance, deferred from 20.3 until 20.4 delivered UIC.
+
+    5 V -> 12 V boost: the IC macromodel is a low-side switch; the user's real
+    inductor (VIN->SW), rectifier diode (SW->OUT), cap and load supply the rest.
+    The op point can't converge (open-loop PWM on a boost), so start from
+    V(OUT)=VIN with uic. Open-loop honesty band: the duty correction assumes a
+    0.45 V diode but the generic Device:D drops ~0.7 V, so assert within 10%.
+    """
+
+    @circuit(name="boost_e2e")
+    def _c():
+        u1 = Component(
+            symbol=SW_SYM,
+            ref="U1",
+            **{"Sim.Device": "BOOST", "Sim.Params": "fsw=500k vout=12"},
+        )
+        v1 = Component(symbol="Simulation_SPICE:VDC", ref="V1", value="5")
+        l1 = Component(symbol="Device:L", ref="L1", value="22u")
+        d1 = Component(symbol="Device:D", ref="D1")
+        cout = Component(symbol="Device:C", ref="C1", value="47u")
+        rload = Component(symbol="Device:R", ref="RL", value="24")
+        vin, sw, out, gnd = Net("VIN"), Net("SW"), Net("OUT"), Net("GND")
+        v1[1] += vin
+        v1[2] += gnd
+        _connect_by_name(u1, "VIN", vin)
+        _connect_by_name(u1, "SW", sw)
+        _connect_by_name(u1, "GND", gnd)
+        l1[1] += vin
+        l1[2] += sw
+        d1[1] += sw  # anode
+        d1[2] += out  # cathode
+        cout[1] += out
+        cout[2] += gnd
+        rload[1] += out
+        rload[2] += gnd
+
+    sim = _c().simulate()
+    res = sim.transient_analysis(
+        step_time=10e-9,
+        end_time=2e-3,
+        use_initial_condition=True,
+        initial_conditions={"OUT": 5.0},
+    )
+    vout = res.average("OUT")
+    assert vout == pytest.approx(12.0, rel=0.10), f"Vout={vout}"
+    assert res.ripple_pp("OUT") < 0.150, f"ripple={res.ripple_pp('OUT')}"
+    il = res.branch_current("L1")
+    t = res.time_array()
+    il_avg = float(np.mean(np.abs(il[t > 0.9 * t[-1]])))
+    # ~24 W/... : Pout 6 W at 5 V in -> ~1.2 A average inductor (input) current.
+    assert 0.8 < il_avg < 1.6, f"IL_avg={il_avg}"
