@@ -2287,10 +2287,27 @@ class SpiceConverter:
             self.spice_circuit.V(
                 source_name, spice_node, self.spice_circuit.gnd, voltage @ u_V
             )
-            logger.debug(f"Added voltage source {source_name}: {voltage}V")
+            logger.info(
+                f"Net '{net_name}': injecting heuristic {voltage} V supply "
+                f"{source_name} from its NAME. If unintended, rename the net or "
+                f"drive it with an explicit Simulation_SPICE:VDC (explicit "
+                f"sources suppress this)."
+            )
 
     def _extract_voltage_from_net_name(self, net_name: str) -> Optional[float]:
         """Extract voltage value from net name (e.g., '+5V' -> 5.0)."""
+        upper = net_name.upper()
+
+        # KiCad "decimal-in-V" notation where the V is the decimal point:
+        # 3V3 -> 3.3, 1V8 -> 1.8. Checked first so "5V" (no trailing digit)
+        # still falls through to the plain patterns below (-> 5.0, not 5.x).
+        m = re.search(r"\+?([0-9]+)V([0-9]+)\b", upper)
+        if m:
+            try:
+                return float(f"{m.group(1)}.{m.group(2)}")
+            except ValueError:
+                pass
+
         # Look for voltage patterns
         patterns = [
             r"\+?([0-9.]+)V",  # +5V, 3.3V, etc.
@@ -2299,7 +2316,7 @@ class SpiceConverter:
         ]
 
         for pattern in patterns:
-            match = re.search(pattern, net_name.upper())
+            match = re.search(pattern, upper)
             if match:
                 try:
                     return float(match.group(1))
@@ -2316,12 +2333,23 @@ class SpiceConverter:
         single-connection net will nonetheless be driven). A bare ``VCC`` with no
         embedded number is *not* driven (no voltage to assign); ``VIN``/``VSUPPLY``
         default to 5 V.
+
+        Rail keywords are matched as **whole tokens**, not substrings, so an
+        intermediate net like ``VINT_RAW`` (tokens ``{VINT, RAW}``) is NOT treated
+        as a ``VIN`` rail -- that substring trap injected a phantom 5 V supply and
+        clamped a 32.5 V boost output (bug #13). Known accepted limitation: a name
+        like ``MAIN_VIN_SENSE`` still matches on the whole token ``VIN`` -- token
+        matching cannot tell it is a sense line; the INFO log in
+        ``_add_power_sources`` makes any such injection visible.
         """
         upper = net_name.upper()
-        if any(p in upper for p in ["VCC", "VDD", "V+", "+5V", "+3V3", "+12V"]):
+        tokens = {t for t in re.split(r"[^A-Z0-9+]+", upper) if t}
+        if tokens & {"VCC", "VDD", "V+"}:
             return self._extract_voltage_from_net_name(upper)
-        if "VIN" in upper or "VSUPPLY" in upper:
+        if tokens & {"VIN", "VSUPPLY"}:
             return self._extract_voltage_from_net_name(upper) or 5.0
+        if any(re.fullmatch(r"\+?[0-9]+V[0-9]*", t) for t in tokens):
+            return self._extract_voltage_from_net_name(upper)
         return None
 
     # ------------------------------------------------------------------ #
