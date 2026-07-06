@@ -182,6 +182,20 @@ def load_circuit_hierarchy(json_file: str) -> (Circuit, Dict[str, Circuit]):
     logger.info(
         f"Finished building circuit hierarchy. Found {len(all_subcircuits)} unique subcircuit(s)."
     )
+
+    # Stage 22.9: warn (never fail) for any footprint id that doesn't exist in the
+    # installed KiCad libraries -- otherwise these only surface as ERC
+    # footprint_link_issues after generation. Skips silently with no KiCad install.
+    try:
+        from .footprint_check import check_footprints
+
+        all_components = [
+            comp for circ in all_subcircuits.values() for comp in circ.components
+        ]
+        check_footprints(all_components)
+    except Exception as e:  # defensive: a footprint check must never break generation
+        logger.debug(f"Footprint check skipped: {e}")
+
     return top_circuit, all_subcircuits
 
 
