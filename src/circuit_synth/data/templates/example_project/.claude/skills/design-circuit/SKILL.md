@@ -159,7 +159,10 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 - **Declaring sources:** use KiCad's real `Simulation_SPICE` symbols — `VDC` for a
   DC supply, `VSIN` for AC/transient stimulus. Pin 1 is `+`, pin 2 is `-`. Do NOT
   use `Device:V`/`Device:I` (not real KiCad symbols). An explicit source overrides
-  the net-name rail heuristic on the nets it drives.
+  the net-name rail heuristic on the nets it drives. That heuristic matches **whole
+  net-name tokens**, not substrings (so `VINT_*`/`VMID_*` are not injected as a
+  `VIN` supply), and logs every rail it injects — check the log if a node reads
+  driven when you didn't declare a source for it.
 - **Transient stimulus:** pass waveform parameters as component kwargs (they are
   stored as extra fields). `VSIN` reads `amplitude`/`frequency`/`offset`; `VPULSE`
   reads `v1`/`v2`/`td`/`tr`/`tf`/`pw`/`per`; `VPWL` reads `points` (a string or a
@@ -186,7 +189,10 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   give `Sim.Params`, in which case it degrades to the kind's generic
   (`DefaultDiode`/`DefaultNPN`/`DefaultNMOS`) with your overrides applied and a
   warning (tier `generic`), so an unlisted part can be param-fitted
-  (e.g. `value="SomeSchottky", Sim.Params="IS=1e-6 RS=0.05"`).
+  (e.g. `value="SomeSchottky", Sim.Params="IS=1e-6 RS=0.05"`). **Diode terminals
+  resolve by the symbol's A/K pin names, not pin order** — on `Device:D*` pin 1 is
+  the cathode (K), so wire the symbol the way the schematic should read and the
+  SPICE anode/cathode follow it automatically (no sim-only polarity flip needed).
 - **Op-amps** default to an ideal VCVS (infinite gain-bandwidth), so feedback/source
   capacitance has no effect on simulated bandwidth or stability. For a bandwidth- or
   stability-sensitive design (e.g. a transimpedance amp with a large source cap) add
@@ -229,6 +235,24 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
     `branch_current("L1")` for inductor current (saturation margin — pass the
     schematic ref). Efficiency: `Pout ≈ average("OUT")**2 / Rload`, `Pin ≈
     average_power("VIN", "Vsource")` (mind the source's current sign).
+  - **CCM test-load sizing (open-loop reads HIGH at light load):** the model is
+    CCM-only, so a load light enough to push the inductor discontinuous reads
+    3–15 % high. Size a sim-only test load (`in_bom=False`, so BOM/ERC stay
+    truthful) to keep it continuous: inductor ripple `dI_pp = VIN·D/(L·fsw)`;
+    require the input-referred average `I_in_avg ≈ VOUT·IOUT/(VIN·η) > dI_pp/2`.
+    Confirm it in the result — `min(branch_current("L1"))` over the settled tail
+    must stay > 0; a negative dip means DCM, so distrust the average (run 3: a
+    guessed 680 Ω read +3–15 %, 300 Ω from this rule read −1.6 %).
+  - **Seed the output IC for steady-state:** start `initial_conditions={"OUT": <≈vout>}`,
+    not `<vin>` — from IC=Vin a boost output overshoots to ~1.4× target then bleeds
+    down with `τ = Cout·Rload`, which usually outlasts a few-ms run, so the tail
+    averages mid-decay. Keep IC=Vin only when the start-up transient itself is what
+    you're measuring.
+  - **Measurement windows:** take `ripple_pp` over the last few switching cycles
+    (`start_time = t_end − 10/fsw`), not the default 20 % tail — that window still
+    holds settling drift. Read inductor peak over the settled tail, **not** globally:
+    the global max is the inrush spike (run 3 saw an 11 A inrush vs 0.42 A steady
+    state), so a global L-peak overstates saturation stress ~26×.
 - **Buck loop stability (averaged model + `.ac`)** — add `mode=avg` and a `vref`
   (the controller's internal reference the divider tap regulates to) to a **buck**'s
   `Sim.Params`, e.g. `Sim.Params="fsw=500k vout=3.3 vref=0.8 mode=avg"`. This swaps
