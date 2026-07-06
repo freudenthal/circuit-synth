@@ -382,90 +382,16 @@ Launch post-release verification:
 - `/dev:run-tests --watch` - Watch mode for continuous testing
 
 ### Code Review & Analysis
-- `/dev:review-branch` - Comprehensive branch review (see branch review details below)
-- `/dev:review-repo` - Full repository analysis and health check
+- Use the built-in `/code-review`, `/review`, and `/security-review` commands
 
 ### Commit Workflow
 - `/dev:update-and-commit [description]` - Document changes and create commit
 
 ### Release Workflow
-- `/dev:release-pypi` - Release to PyPI with version bump
-- `/dev:dead-code-analysis` - Find unused code before release
+- `/dev:dead-code-analysis` - Find unused code
 
 ### Development Setup
 - `./tools/maintenance/ensure-clean-environment.sh` - Clean pip environment, prevent conflicts
-
----
-
-## 📊 Review Branch Workflow
-
-The `/dev:review-branch` command provides comprehensive pre-merge review. Key features:
-
-### What It Does:
-
-1. **Code Quality Analysis** - Cyclomatic complexity, maintainability, type hints
-2. **Security Scanning** - Hardcoded secrets, unsafe patterns, dependency vulnerabilities
-3. **Performance Review** - Algorithm complexity, regression detection
-4. **Testing Coverage** - New code coverage, regression test adequacy
-5. **Documentation** - API docs current, README updated, examples work
-6. **Circuit-Synth Specific** - Component validation, KiCad integration, agent system
-7. **Dependency Analysis** - New dependencies, version changes, security updates
-
-### Usage Examples:
-
-```bash
-# Quick check before committing
-/dev:review-branch --depth=quick
-
-# Full review before merging to main
-/dev:review-branch --depth=full --target=main
-
-# Security-focused review
-/dev:review-branch --focus=security --threshold=critical
-
-# Performance analysis
-/dev:review-branch --focus=performance --depth=full
-
-# With auto-fix suggestions
-/dev:review-branch --depth=full --auto-fix=true
-```
-
-### Expected Output:
-
-```markdown
-# Branch Review: feat/add-potentiometer → main
-
-## Executive Summary
-- Risk: MEDIUM
-- Key Changes: Added Potentiometer component, 3 files changed, 45 lines added
-- Test Coverage: 85% (↑ 2%)
-- Action Items: Update website documentation
-
-## Detailed Analysis
-### Code Quality: ✓ GOOD
-- Complexity: 5/10
-- Type Coverage: 100%
-- Documentation: Complete
-
-### Testing: ✓ GOOD
-- New Tests: 8 tests added
-- Coverage: 85% (new code 90%)
-- Regression: All tests pass
-
-### Security: ✓ CLEAN
-- No hardcoded secrets
-- No unsafe patterns
-- Dependencies: OK
-
-### Documentation: ⚠️ NEEDS WORK
-- README should mention new component
-- Website examples should show Potentiometer
-
-## Recommendations
-1. Update README.md to mention Potentiometer
-2. Add Potentiometer example to website
-3. Ready to merge after documentation update
-```
 
 ---
 
