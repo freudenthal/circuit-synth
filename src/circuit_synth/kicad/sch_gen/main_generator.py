@@ -691,6 +691,12 @@ class SchematicGenerator:
 
         if project_exists and not force_regenerate:
             # Auto-switch to update mode
+            logger.info(
+                f"Updating '{self.project_name}' in place (force_regenerate=False): "
+                "existing components keep their placement; structural renames may not "
+                "apply. Delete the output dir or pass force_regenerate=True for a clean "
+                "rebuild."
+            )
             logger.info(f"Existing KiCad project detected at: {self.project_dir}")
             logger.info(
                 "Automatically switching to update mode to preserve your work"
@@ -730,6 +736,7 @@ class SchematicGenerator:
             # For now, we'll proceed with regeneration
 
         # Original generate_project logic starts here
+        logger.info(f"Generating '{self.project_name}' (fresh build)")
         if generate_pcb:
             logger.info(
                 f"Generating KiCad project '{self.project_name}' with schematics and PCB from '{json_file}'"

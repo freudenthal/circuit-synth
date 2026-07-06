@@ -290,6 +290,16 @@ class APISynchronizer:
                 f"{len(report.added)} added, {len(report.modified)} modified"
             )
 
+            # Update-mode visibility summary (Stage 22.6, bug #10): make the
+            # match/add/remove/preserve outcome visible at INFO so a silently
+            # stale update (e.g. a structural rename that did not apply) is not
+            # invisible until the file is diffed.
+            logger.info(
+                f"Update mode: matched {len(report.matched)}, "
+                f"added {len(report.added)}, removed {len(report.removed)}, "
+                f"kicad-only preserved {len(report.preserved)} component(s)."
+            )
+
         except Exception as e:
             logger.error(f"Synchronization failed: {e}")
             print(f"[ERROR] Synchronization failed: {e}")
