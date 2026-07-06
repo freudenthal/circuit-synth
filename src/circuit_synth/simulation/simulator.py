@@ -8,6 +8,7 @@ on circuit-synth designs.
 import logging
 import os
 import platform
+import re
 from typing import Dict, List, Optional, Tuple, Union
 
 # Configure logging
@@ -334,11 +335,35 @@ class SimulationResult:
 class CircuitSimulator:
     """Main interface for SPICE simulation of circuit-synth designs."""
 
-    def __init__(self, circuit_synth_circuit):
+    # Accepted ngspice ``ngbehavior`` dialect selectors (compat modes). "psa" is
+    # PSpice + whole-netlist, the mode most TI-style vendor .lib files need.
+    _VALID_COMPAT = re.compile(r"^(ps|lt|ki|a|all|psa|lta|ltps|ltpsa)$")
+
+    # Process-global: whether the singleton NgSpiceShared currently has a compat
+    # ngbehavior set. NgSpiceShared.new_instance() returns one instance per
+    # process, so a compat mode set for one simulation persists into later ones --
+    # this flag lets the next default-mode run unset it (see _make_simulator).
+    _ngbehavior_set = False
+
+    def __init__(self, circuit_synth_circuit, compat=None):
+        """Build a simulator for a circuit.
+
+        ``compat`` selects an ngspice dialect (``ngbehavior``) so vendor
+        PSpice/LTspice-flavored ``.lib`` files parse -- e.g. ``compat="psa"`` for a
+        TI-style unencrypted PSpice model. Accepted: ps, lt, ki, a, all, psa, lta,
+        ltps, ltpsa. When ``compat`` is None, a schematic ``Sim.Compat`` property
+        (if any) is used instead; an explicit ``compat`` argument wins over it.
+        """
         if not PYSPICE_AVAILABLE:
             raise ImportError(
                 "PySpice not available. Install with: pip install PySpice\n"
                 "Also ensure ngspice is installed on your system."
+            )
+        if compat is not None and not self._VALID_COMPAT.match(str(compat)):
+            raise ValueError(
+                f"invalid compat mode {compat!r}; expected one of "
+                f"ps, lt, ki, a, all, psa, lta, ltps, ltpsa (e.g. 'psa' for a "
+                f"TI-style PSpice vendor library)"
             )
 
         self.circuit_synth_circuit = circuit_synth_circuit
@@ -346,7 +371,21 @@ class CircuitSimulator:
         # {ref: ResolvedModel} recording which model tier each active device got
         # (datasheet_fit / generic / vendor_lib). Populated during conversion.
         self.model_provenance = {}
+        # The ngspice dialect a schematic requested via Sim.Compat, if any.
+        self._compat_hint = None
         self._convert_to_spice()
+        # Explicit arg wins; otherwise adopt the schematic's Sim.Compat hint. An
+        # invalid hint (a typo in the schematic) is warned about and ignored rather
+        # than crashing the whole design.
+        self._compat = compat
+        if self._compat is None and self._compat_hint:
+            if self._VALID_COMPAT.match(str(self._compat_hint)):
+                self._compat = str(self._compat_hint)
+            else:
+                logger.warning(
+                    f"ignoring invalid Sim.Compat {self._compat_hint!r} "
+                    f"(expected ps/lt/ki/a/all/psa/lta/ltps/ltpsa)"
+                )
 
     def _convert_to_spice(self):
         """Convert circuit-synth circuit to PySpice format."""
@@ -355,6 +394,7 @@ class CircuitSimulator:
         converter = SpiceConverter(self.circuit_synth_circuit)
         self.spice_circuit = converter.convert()
         self.model_provenance = converter.model_provenance
+        self._compat_hint = getattr(converter, "compat_hint", None)
 
     def _make_simulator(self, temperature: float, options: Optional[Dict] = None):
         """Build a PySpice simulator with temperature and optional ngspice options.
@@ -365,9 +405,32 @@ class CircuitSimulator:
         """
         if not self.spice_circuit:
             raise RuntimeError("SPICE circuit not initialized")
-        simulator = self.spice_circuit.simulator(
-            temperature=temperature, nominal_temperature=temperature
-        )
+
+        compat = getattr(self, "_compat", None)
+        # Only touch the shared ngspice instance when a compat mode is active or a
+        # previous compat run left ngbehavior set (which must be cleared for a
+        # default-mode run, since the instance is a per-process singleton).
+        # Otherwise use the legacy call unchanged, so default sims are unaffected.
+        if compat or CircuitSimulator._ngbehavior_set:
+            shared = NgSpiceShared.new_instance()
+            if compat:
+                shared.exec_command(f"set ngbehavior={compat}")
+                CircuitSimulator._ngbehavior_set = True
+                logger.debug(f"ngspice compat mode: set ngbehavior={compat}")
+            else:
+                shared.exec_command("unset ngbehavior")
+                CircuitSimulator._ngbehavior_set = False
+                logger.debug("ngspice compat mode: unset ngbehavior (default dialect)")
+            simulator = self.spice_circuit.simulator(
+                temperature=temperature,
+                nominal_temperature=temperature,
+                simulator="ngspice-shared",
+                ngspice_shared=shared,
+            )
+        else:
+            simulator = self.spice_circuit.simulator(
+                temperature=temperature, nominal_temperature=temperature
+            )
         if options:
             simulator.options(**options)
         return simulator

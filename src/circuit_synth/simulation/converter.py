@@ -108,6 +108,10 @@ class SpiceConverter:
         self.model_provenance = {}
         # Absolute paths of external .lib/.sub files already `.include`d (dedup).
         self.included_libs = set()
+        # First non-empty Sim.Compat across components (e.g. "psa" for a vendor
+        # PSpice lib) -> the ngspice dialect the simulator should select. Resolved
+        # in convert(); a disagreement between components is a validate() error.
+        self.compat_hint = None
         # After _flatten on a hierarchical circuit: flat_ref -> (subcircuit_name,
         # original_ref) for any ref that had to be uniquified. Empty otherwise.
         # Keeps model provenance / error messages traceable back to the source.
@@ -218,6 +222,9 @@ class SpiceConverter:
 
         if strict:
             self.validate()
+
+        # Resolve the requested ngspice dialect (Sim.Compat) for the simulator.
+        self.compat_hint = self._resolve_compat_hint()
 
         # Create PySpice circuit
         circuit_name = getattr(self.circuit, "name", "Circuit")
@@ -363,6 +370,26 @@ class SpiceConverter:
         if val is None:
             return False
         return str(val).strip().lower() in ("0", "false", "no", "off")
+
+    def _distinct_compat_values(self) -> list:
+        """Distinct non-empty ``Sim.Compat`` values across components (sorted)."""
+        values = set()
+        for component in self._iter_components():
+            if self._sim_excluded(component):
+                continue
+            val = self._sim_props(component).get("compat")
+            if val is not None and str(val).strip():
+                values.add(str(val).strip())
+        return sorted(values)
+
+    def _resolve_compat_hint(self) -> Optional[str]:
+        """The single ``Sim.Compat`` dialect requested by the schematic, or None.
+
+        A disagreement between components is caught in ``validate()``; here we just
+        take the first value so conversion still proceeds in the lenient path.
+        """
+        values = self._distinct_compat_values()
+        return values[0] if values else None
 
     def _kind(self, component) -> Optional[str]:
         """SPICE primitive kind for a component: ``Sim.Device`` wins over the symbol.
@@ -653,8 +680,8 @@ class SpiceConverter:
         if sub:
             nodes = []
             for tok in sub.group(1).split():
-                if "=" in tok:
-                    break  # start of subckt parameters
+                if tok.lower() == "params:" or "=" in tok:
+                    break  # PSpice 'PARAMS:' keyword or the first param -> nodes end
                 nodes.append(tok)
             return "subckt", nodes
         mod = re.search(
@@ -688,7 +715,7 @@ class SpiceConverter:
         if sub and (not mod or sub.start() < mod.start()):
             nodes = []
             for tok in sub.group(2).split():
-                if "=" in tok:
+                if tok.lower() == "params:" or "=" in tok:
                     break
                 nodes.append(tok)
             return "subckt", sub.group(1), nodes
@@ -791,7 +818,17 @@ class SpiceConverter:
                     f"{ref}: subckt '{name}' takes {len(subckt_nodes)} nodes but "
                     f"{len(nodes)} were mapped (check Sim.Pins)"
                 )
-            self.spice_circuit.X(ref, name, *nodes)
+            # Pass Sim.Params through as subckt parameters (X ... NAME p=v). A
+            # Sim.Library part has no other Sim.Params consumer (the derived-model
+            # path is only reached for built-in primitives), so this is safe to
+            # reuse. Empty -> no kwargs -> byte-identical to the pre-20.2 emission.
+            xparams = {
+                k.lower(): v
+                for k, v in self._parse_sim_params(
+                    self._sim_props(component).get("params")
+                ).items()
+            }
+            self.spice_circuit.X(ref, name, *nodes, **xparams)
             self.model_provenance[ref] = ResolvedModel(
                 ref, dev_kind or "subckt", "vendor_lib", name, source=source
             )
@@ -2134,6 +2171,14 @@ class SpiceConverter:
                     f"{ref}: Sim.Name '{name}' is neither a .subckt nor a .model in "
                     f"{os.path.basename(str(path))}"
                 )
+
+        # 7. Sim.Compat must be unambiguous: one ngspice dialect per simulation.
+        compat_values = self._distinct_compat_values()
+        if len(compat_values) > 1:
+            problems.append(
+                f"conflicting Sim.Compat values across components: "
+                f"{', '.join(compat_values)} (one dialect per simulation)"
+            )
 
         if problems:
             raise SimulationValidationError(problems)

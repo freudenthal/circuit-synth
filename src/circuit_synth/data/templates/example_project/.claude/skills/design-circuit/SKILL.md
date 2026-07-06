@@ -195,8 +195,15 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   use it for connectors/test points so `validate()` doesn't flag them);
   `Sim.Params="bf=250 vaf=80"` overrides model params; `Sim.Library="path.lib"` +
   `Sim.Name="MODEL"` (+ optional `Sim.Pins="1=out 2=inp 3=inn"`) attaches an external
-  vendor `.lib`/`.subckt` model verbatim. Pass dotted names as
+  vendor `.lib`/`.subckt` model verbatim, and if that subckt takes parameters
+  `Sim.Params="gain=3 fsw=500k"` passes them on the instance line. Pass dotted names as
   `Component(..., **{"Sim.Enable": "0"})`.
+- **Vendor PSpice/LTspice model dialect:** most vendor `.lib` files (e.g. TI's
+  unencrypted PSpice models) use idioms ngspice rejects by default (`PARAMS:`,
+  `VALUE={IF(...)}`). Run them with `circuit.simulate(compat="psa").operating_point()`
+  (`psa` = PSpice + whole-netlist; also `lt`/`ltps`/`a` etc.), or put `Sim.Compat="psa"`
+  on the schematic next to the `Sim.Library` that needs it. Without it such a model
+  errors on load. Encrypted vendor models (`.enc`) can't be used by ngspice at all.
 - **Keeping a part out of the BOM (KiCad `in_bom`):** `Sim.Enable="0"` is *not* a BOM
   control — a real part can be sim-disabled yet still belong in the BOM. Two BOM
   exclusions apply automatically: `Simulation_SPICE:*` stimulus symbols (voltage/

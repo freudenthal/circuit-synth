@@ -1331,13 +1331,19 @@ class Circuit:
             )
             return {"success": False, "error": error_msg}
 
-    def simulate(self):
+    def simulate(self, compat=None):
         """
         Create a simulator instance for this circuit.
 
         This method provides access to circuit simulation capabilities using
         PySpice as the backend. The returned simulator object can be used to
         run various analyses such as DC operating point, transient, and AC.
+
+        Args:
+            compat: Optional ngspice dialect (``ngbehavior``) so vendor
+                PSpice/LTspice-flavored ``.lib`` files parse -- e.g.
+                ``compat="psa"`` for a TI-style PSpice model. When omitted, a
+                schematic ``Sim.Compat`` property is used if present.
 
         Returns:
             CircuitSimulator: Simulator object for running analyses
@@ -1367,16 +1373,16 @@ class Circuit:
             component="CIRCUIT",
             circuit_name=self.name,
         )
-        return CircuitSimulator(self)
+        return CircuitSimulator(self, compat=compat)
 
-    def simulator(self):
+    def simulator(self, compat=None):
         """
         Alias for simulate() method for backward compatibility.
 
         Returns:
             CircuitSimulator: Simulator object for running analyses
         """
-        return self.simulate()
+        return self.simulate(compat=compat)
 
 
     @property
