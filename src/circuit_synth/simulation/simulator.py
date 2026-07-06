@@ -593,12 +593,56 @@ class CircuitSimulator:
         end_time: float,
         temperature: float = 25,
         options: Optional[Dict] = None,
+        *,
+        start_time: float = 0,
+        max_time: Optional[float] = None,
+        use_initial_condition: bool = False,
+        initial_conditions: Optional[Dict[str, float]] = None,
     ) -> SimulationResult:
-        """Run transient analysis."""
+        """Run transient analysis.
+
+        Times are in seconds. The keyword-only controls below are the standard
+        ngspice ``.tran``/``.ic`` knobs that power-supply (soft-start, stiff
+        vendor-model) simulations need; with none supplied the call is identical
+        to the legacy two-argument form.
+
+        Args:
+            step_time: Suggested timestep (``tstep``).
+            end_time: Stop time (``tstop``).
+            temperature: Simulation temperature in Celsius.
+            options: ngspice ``.options`` overrides (see ``_make_simulator``).
+            start_time: Discard results before this time (``tstart``) -- smaller
+                result arrays; the run still integrates from t=0.
+            max_time: Cap the internal timestep (``tmax``) for accuracy on stiff
+                circuits; ``None`` lets ngspice choose.
+            use_initial_condition: Emit ``uic`` -- skip the DC operating point and
+                start from device/``.ic`` initial conditions. Required when the op
+                point does not converge (common with vendor switcher models).
+            initial_conditions: ``{net_name: volts}`` emitted as ``.ic
+                v(net)=volts``. Pass the circuit-synth **net name** (e.g. ``"VOUT"``,
+                ``"OUT"``); it is used verbatim as the node name and ngspice matches
+                it case-insensitively. For a soft-start from a discharged output use
+                ``use_initial_condition=True, initial_conditions={"VOUT": 0}``.
+
+        Note:
+            ``.nodeset`` is not exposed (no PySpice API surface); use
+            ``initial_conditions`` instead.
+        """
         simulator = self._make_simulator(temperature, options)
-        analysis = simulator.transient(
-            step_time=step_time @ u_s, end_time=end_time @ u_s
-        )
+        if initial_conditions:
+            # PySpice's initial_condition(**kwargs) maps node_name -> value; the
+            # net name is passed straight through as the ngspice node name.
+            simulator.initial_condition(**dict(initial_conditions))
+        # Build kwargs minimally so a controls-free call is byte-identical to the
+        # legacy transient() (protects the default-path baseline).
+        kwargs = dict(step_time=step_time @ u_s, end_time=end_time @ u_s)
+        if start_time:
+            kwargs["start_time"] = start_time @ u_s
+        if max_time is not None:
+            kwargs["max_time"] = max_time @ u_s
+        if use_initial_condition:
+            kwargs["use_initial_condition"] = True
+        analysis = simulator.transient(**kwargs)
 
         return SimulationResult(analysis, "transient")
 

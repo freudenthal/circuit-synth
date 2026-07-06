@@ -166,6 +166,14 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   list of `(t, v)` pairs). Keep SI suffixes (`1k`/`1m`/`1u`/`1n`) — ngspice parses
   them. Run with `sim.transient_analysis(step_s, end_s)`; an optional `options={...}`
   (e.g. `reltol`/`abstol`/`gmin`) tunes ngspice convergence on any analysis.
+- **Transient initial conditions / UIC:** `transient_analysis` takes keyword-only
+  `use_initial_condition=True` (emit `uic` — skip the DC op point; needed when a
+  stiff/switcher model won't converge), `initial_conditions={"VOUT": 0}` (`.ic`
+  node voltages — pass the **net name**, matched case-insensitively), `start_time`
+  (discard the settling head) and `max_time` (cap the internal timestep). A
+  soft-start run from a discharged output is
+  `sim.transient_analysis(step_s, end_s, use_initial_condition=True, initial_conditions={"VOUT": 0})`.
+  (`.nodeset` is not exposed — use `initial_conditions`.)
 - **Active-device models (diodes/BJTs/MOSFETs):** naming a real part in `value`
   (e.g. `value="1N4148"`, `value="2N3904"`) pulls **datasheet-fit** parameters from
   the built-in model library when known; otherwise a device falls back to a
