@@ -138,6 +138,17 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   FAIL → route back to Phase 3 (fix the connection). **Warnings** like
   `isolated_pin_label` on an I/O net terminated by a single label are normal —
   note them, don't chase them. If kicad-cli is absent, skip this phase.
+- **Save-crash gate.** ERC/netlist/PDF all *load* a schematic that KiCad's GUI
+  would crash (segfault + truncate) when saving — so before trusting the file,
+  reproduce a GUI save headlessly: **copy** the `.kicad_sch`, run
+  `kicad-cli sch upgrade --force <copy>` on the copy, and require **all three**:
+  `rc == 0` **AND** the copy is still `> 0` bytes **AND** it reloads
+  (`kicad-cli sch erc <copy>` → 0 or 5). Traps that make this read a false
+  "clean": never read the rc through a pipe (`… | tail; echo $?` reports tail's
+  rc — a 139 segfault prints "0"); a crash can leave a **0-byte file at any rc**;
+  and on Windows/Git-Bash never hand `kicad-cli.exe` an MSYS `/tmp/...` path (it
+  silently writes 0 bytes, exit 0) — use project-relative paths. A `rc=139` here
+  is a real corruption bug, not a warning.
 
 ## Phase 5 — SIMULATE
 <!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/loop-boundary-contract.md rule R3. -->

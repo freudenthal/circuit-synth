@@ -9,75 +9,15 @@ Requires KiCad 10's kicad-cli (skips cleanly if absent).
 """
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from circuit_synth import Component, Net, circuit
-from circuit_synth.kicad.sch_gen.erc_gate import _find_kicad_cli
+
+from .kicad_gate_utils import assert_kicad_save_ok
 
 pytestmark = pytest.mark.e2e
-
-
-def assert_kicad_save_ok(sch_path, kicad_cli=None):
-    """Assert KiCad can re-save ``sch_path`` without crashing.
-
-    Copies the file, runs ``kicad-cli sch upgrade --force`` on the copy (KiCad's
-    own writer -- a headless proxy for a GUI save), and asserts the write
-    round-trips: ``rc == 0`` AND the file is non-empty AND ``kicad-cli sch erc``
-    reloads it. This 3-part gate guards the traps that hid bug #B:
-
-      1. Pipe rc trap -- ``... | tail; echo $?`` reports *tail's* rc, so a 139
-         segfault reads as 0. We use ``subprocess.run`` with a list argv (no
-         shell) and read ``.returncode`` directly.
-      2. 0-byte truncation -- a mid-write crash can leave a 0-byte file, so
-         "rc != 139" is not enough; assert ``size > 0``.
-      3. MSYS path trap (bash-only, N/A from Python) -- handing the Windows
-         ``kicad-cli.exe`` an MSYS ``/tmp/...`` path makes it silently write a
-         0-byte file with rc=0. Always pass native paths; ``tmp_path`` is native.
-
-    Skips (does not fail) if kicad-cli is unavailable.
-    """
-    sch_path = Path(sch_path)
-    try:
-        cli = kicad_cli or _find_kicad_cli()
-    except Exception:
-        pytest.skip("kicad-cli (KiCad 10) not available")
-
-    copy = sch_path.with_name(sch_path.stem + "_savecopy.kicad_sch")
-    shutil.copyfile(sch_path, copy)
-
-    up = subprocess.run(
-        [cli, "sch", "upgrade", "--force", str(copy)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert up.returncode == 0, (
-        f"kicad-cli sch upgrade returned {up.returncode} on {copy.name} "
-        f"(139 = segfault -> KiCad save crash). stderr: {up.stderr.strip()}"
-    )
-    size = copy.stat().st_size
-    assert size > 0, (
-        f"{copy.name} is 0 bytes after upgrade (crash truncated it, or an MSYS "
-        f"path trap); rc was {up.returncode}"
-    )
-    # -o keeps the .rpt beside the copy (in tmp) instead of polluting cwd.
-    erc = subprocess.run(
-        [cli, "sch", "erc", "-o", str(copy.with_suffix(".rpt")), str(copy)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    # ERC returns 0 (clean) or 5 (violations exist) on a *loadable* file; a
-    # crash/parse failure is a different, nonzero code. Either 0/5 proves reload.
-    assert erc.returncode in (0, 5), (
-        f"upgraded {copy.name} failed to reload in kicad-cli sch erc "
-        f"(rc={erc.returncode}). stderr: {erc.stderr.strip()}"
-    )
-
 
 R_FP = "Resistor_SMD:R_0603_1608Metric"
 
