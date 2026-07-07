@@ -2,7 +2,7 @@
 
 Grep/AST-level checks that the design loop's *agnostic* layer stays DSL-neutral, so
 a future circuit-synth -> SKiDL (or any DSL) swap stays a live option at zero cost.
-Rules R2/R3/R4 of ``workingdocs/loop-boundary-contract.md``; R1 lives in
+Rules R2/R3/R4 of ``workingdocs/design_considerations/loop-boundary-contract.md``; R1 lives in
 ``kicad-sch-api/tests/mcp/test_boundary_contract.py``. Pure file reads — fast,
 dependency-free.
 """

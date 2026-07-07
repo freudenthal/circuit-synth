@@ -74,7 +74,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
     the schematic (same mechanism as `Sim.*`); no schema change needed.
 
 ## Phase 3 — WRITE
-<!-- language-coupled: this WRITE step teaches the circuit_synth DSL (@circuit / Net / generate_kicad_project). A future DSL swap repoints this section only; see workingdocs/loop-boundary-contract.md rule R3. -->
+<!-- language-coupled: this WRITE step teaches the circuit_synth DSL (@circuit / Net / generate_kicad_project). A future DSL swap repoints this section only; see workingdocs/design_considerations/loop-boundary-contract.md rule R3. -->
 - Create/modify `circuit-synth/<snake_case_name>.py` following `main.py`'s
   pattern: `@circuit(name=...)`, `Net(...)` for connections (GND/VCC-style
   names auto-become power symbols), `component[pin] += net`.
@@ -113,7 +113,7 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 
 ## Phase 4 — GENERATE
 - Run: `PYTHONUTF8=1 uv run python circuit-synth/<name>.py`
-<!-- language-coupled: the @circuit(name=)/project_name= file-naming rule is circuit_synth-specific. See workingdocs/loop-boundary-contract.md rule R3. -->
+<!-- language-coupled: the @circuit(name=)/project_name= file-naming rule is circuit_synth-specific. See workingdocs/design_considerations/loop-boundary-contract.md rule R3. -->
 - **The generated `.kicad_sch`/`.kicad_pro` are named after `@circuit(name=...)`,
   NOT the `project_name=` folder** (issue #358). So a design with
   `@circuit(name="sipm_tia")` written by `generate_kicad_project(project_name=
@@ -187,7 +187,7 @@ won't guess them, so every real-part design must fix them in the Python source:
   need to split a dual into two singles.
 
 ## Phase 5 — SIMULATE
-<!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/loop-boundary-contract.md rule R3. -->
+<!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/design_considerations/loop-boundary-contract.md rule R3. -->
 - **DC / operating point:** follow the working pattern in
   `tools/simulate_example.py` to run an operating-point analysis of your circuit
   and capture node voltages for every net named in the acceptance criteria. The
@@ -417,7 +417,7 @@ the Python file**, not the `.kicad_sch` — every downstream step (simulation,
 edits must go there. In-place edits to the generated `.kicad_sch` are invisible
 to those steps and are **overwritten the next time the project is regenerated**.
 
-<!-- language-coupled: the edit steps operate on the circuit_synth Python source (generate_kicad_project / force_regenerate update mode). See workingdocs/loop-boundary-contract.md rule R3. -->
+<!-- language-coupled: the edit steps operate on the circuit_synth Python source (generate_kicad_project / force_regenerate update mode). See workingdocs/design_considerations/loop-boundary-contract.md rule R3. -->
 1. **Locate the source.** Find the `circuit-synth/*.py` whose
    `generate_kicad_project(project_name=...)` matches the project the user means
    (usually `main.py` or the one named after the target). If several could

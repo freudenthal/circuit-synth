@@ -33,7 +33,7 @@ procedure, `tools/find_symbol.py`, the kicad-sch-api MCP server, `.claude`/`.mcp
 kept separate from the **circuit_synth-coupled engine** (`core`, `simulation`,
 `kicad.sch_gen`, `interop.skidl_export`) so a future DSL swap (e.g. SKiDL) stays a
 live option at near-zero cost. This is a stated, test-enforced contract:
-`workingdocs/loop-boundary-contract.md` (rules R1–R5), enforced by
+`workingdocs/design_considerations/loop-boundary-contract.md` (rules R1–R5), enforced by
 `tests/unit/test_loop_boundary_contract.py`. **New loop tooling must declare its
 layer** (add a row to the contract's layer table in the same commit — rule R5).
 
