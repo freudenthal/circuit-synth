@@ -115,6 +115,21 @@ def test_export_seed_placement_emitted_only_when_true(tmp_path):
     assert "seed_placement=True" in on
 
 
+def test_export_seed_always_emitted_for_determinism(tmp_path):
+    # The RNG seed is ALWAYS emitted (unlike seed_placement) so renders are
+    # deterministic: without it skidl does random.seed(None) == OS entropy.
+    default = export_skidl_script(_divider(), tmp_path / "s_def_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    assert "seed=1" in default
+
+    # An explicit override propagates verbatim.
+    override = export_skidl_script(
+        _divider(), tmp_path / "s_ov_skidl.py", seed=7
+    ).read_text(encoding="utf-8")
+    assert "seed=7" in override
+
+
 def test_export_small_subcircuit_max_keeps_wires_by_default(tmp_path):
     # Default 0 -> small hierarchical sheets keep their wires (skidl's cosmetic
     # blanket-stub of <=6-net subcircuits is disabled).

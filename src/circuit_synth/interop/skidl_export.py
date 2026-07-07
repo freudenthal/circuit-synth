@@ -147,6 +147,7 @@ def _render_script_text(
     symbol_dir: str,
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
+    seed: int = 1,
 ) -> str:
     groups = _iter_groups(circuit)
     if not groups:
@@ -247,6 +248,11 @@ def _render_script_text(
     w(f"        flatness={float(flatness)!r},")
     w(f"        auto_stub={bool(auto_stub)!r},")
     w('        auto_stub_fallback="labels",')
+    # Always pin the RNG seed so the render is deterministic. Without this,
+    # skidl's place.py/route.py do `random.seed(options.get("seed"))` == None ==
+    # OS entropy, making every render non-deterministic by construction. Stock
+    # skidl consumes `seed` (via **options), so this is safe there too (stage 19).
+    w(f"        seed={int(seed)!r},")
     # Keep wires in small hierarchical sheets: skidl's default blanket-stubs any
     # subcircuit with <=6 routeable nets to labels (cosmetic), which is exactly
     # what empties readable functional sub-sheets of wires. 0 disables it; a
@@ -275,6 +281,7 @@ def export_skidl_script(
     symbol_dir: Optional[str] = None,
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
+    seed: int = 1,
 ) -> Path:
     """Emit a standalone SKiDL script that renders *circuit* to a ``.kicad_sch``.
 
@@ -297,6 +304,7 @@ def export_skidl_script(
         symbol_dir=symbol_dir or DEFAULT_KICAD_SYMBOL_DIR,
         seed_placement=seed_placement,
         small_subcircuit_max=small_subcircuit_max,
+        seed=seed,
     )
     out_path.write_text(text, encoding="utf-8")
     logger.info("Wrote SKiDL export script to %s", out_path)
@@ -333,6 +341,7 @@ def render_with_skidl(
     symbol_dir: Optional[str] = None,
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
+    seed: int = 1,
     timeout: int = 600,
 ) -> Path:
     """Render *circuit* to a wire-routed ``.kicad_sch`` set under *out_dir* via SKiDL.
@@ -359,6 +368,7 @@ def render_with_skidl(
         symbol_dir=symbol_dir,
         seed_placement=seed_placement,
         small_subcircuit_max=small_subcircuit_max,
+        seed=seed,
     )
 
     exe = python_exe or os.environ.get(SKIDL_PYTHON_ENV) or sys.executable
