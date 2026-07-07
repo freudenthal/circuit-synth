@@ -617,6 +617,7 @@ class Circuit:
         preserve_user_components: bool = False,
         erc_gate: bool = True,
         selective_wires: bool = True,
+        renderer: str = "native",
     ) -> Dict[str, Any]:
         """
         Generate a complete KiCad project (schematic + PCB) from this circuit.
@@ -652,6 +653,19 @@ class Circuit:
                      netlist-equivalence check that reverts if a wire would change
                      connectivity, so it can only ever add cosmetic wires. Summary on
                      `result["selective_wires"]`. Pass False to skip it.
+            renderer: Which schematic renderer produces the deliverable
+                     (default "native"). "native" is today's output, byte-identical
+                     and untouched. "skidl" renders a fully wire-routed schematic via
+                     SKiDL (requires a skidl-capable interpreter, set
+                     CIRCUIT_SYNTH_SKIDL_PYTHON) and installs it ONLY if it passes a
+                     netlist-equivalence gate vs the native render AND a hardened save
+                     gate; the native set is kept under `<project>/native_ref/`. ANY
+                     failure (no interpreter, render/gate failure) falls back to the
+                     native output with a loud warning — generation never fails over
+                     the renderer choice. `selective_wires` is skipped under "skidl"
+                     (the render is already routed). Check `result["renderer"]` to see
+                     what was actually installed. Update mode (force_regenerate=False)
+                     is unsupported under "skidl" and falls back to native.
 
         Returns:
             dict: Result dictionary containing:
@@ -666,6 +680,15 @@ class Circuit:
             >>> print(f"JSON netlist: {result['json_path']}")
             >>> print(f"KiCad project: {result['project_path']}")
         """
+        # Validate the renderer choice before any generation happens.
+        if renderer not in ("native", "skidl"):
+            raise ValueError(
+                f"renderer must be 'native' or 'skidl', got {renderer!r}"
+            )
+        # The routed skidl render is already fully wired; the cosmetic
+        # selective-wiring pass is meaningless on it.
+        effective_selective_wires = selective_wires and renderer != "skidl"
+
         try:
             from .. import print_version_info
             from ..kicad.config import get_recommended_generator
@@ -799,8 +822,61 @@ class Circuit:
 
                 root_sch = output_path / f"{project_base_name}.kicad_sch"
 
+                # Renderer selection (stage 19 Phase E): optionally replace the
+                # native schematic with a routed SKiDL render, gated by netlist
+                # equivalence + a hardened save gate, with the native set kept in
+                # native_ref/. Any failure falls back to the native output.
+                success_result["renderer"] = "native"
+                if renderer == "skidl" and root_sch.exists():
+                    if not force_regenerate:
+                        context_logger.warning(
+                            "renderer='skidl' re-renders the schematic wholesale; "
+                            "update-mode preservation of manual KiCad edits does not "
+                            "apply to the rendered output (native_ref/ keeps the "
+                            "native render).",
+                            component="CIRCUIT",
+                        )
+                    try:
+                        from ..kicad.skidl_render_gate import (
+                            render_skidl_and_install,
+                        )
+
+                        gate = render_skidl_and_install(
+                            self, output_path, project_base_name,
+                            seed_placement=False,  # stage-19 verdict: seed opt-in
+                        )
+                        success_result["netlist_equivalence"] = gate.get("equivalence")
+                        if gate.get("installed"):
+                            success_result["renderer"] = "skidl"
+                            success_result["native_ref"] = gate.get("native_ref")
+                            context_logger.info(
+                                "Installed SKiDL render "
+                                f"({gate.get('wires')} wires); native kept in "
+                                f"{gate.get('native_ref')}",
+                                component="CIRCUIT",
+                            )
+                        else:
+                            success_result["renderer"] = (
+                                f"native (fallback: {gate.get('reason')})"
+                            )
+                            context_logger.warning(
+                                "=" * 60 + "\nSKiDL render NOT installed — keeping "
+                                f"native output.\nReason: {gate.get('reason')}\n"
+                                + "=" * 60,
+                                component="CIRCUIT",
+                            )
+                    except Exception as e:  # never fail generation over the renderer
+                        success_result["renderer"] = (
+                            f"native (fallback: {type(e).__name__}: {e})"
+                        )
+                        context_logger.warning(
+                            "SKiDL render path errored; keeping native output: "
+                            f"{type(e).__name__}: {e}",
+                            component="CIRCUIT",
+                        )
+
                 # Post-generation readability pass: draw wires for simple local nets.
-                if selective_wires and root_sch.exists():
+                if effective_selective_wires and root_sch.exists():
                     try:
                         from ..kicad.sch_gen.selective_wiring import wire_local_nets
 
@@ -837,6 +913,33 @@ class Circuit:
                     except Exception as e:  # ERC must never break generation
                         context_logger.warning(
                             f"ERC gate skipped ({type(e).__name__}): {e}",
+                            component="CIRCUIT",
+                        )
+
+                # If we installed the skidl render, the ERC autofix edited it via
+                # kicad-sch-api (which has save-crash gotchas). Re-verify the save
+                # gate on the final schematic; restore native if it regressed.
+                if success_result.get("renderer") == "skidl":
+                    try:
+                        from ..kicad.skidl_render_gate import (
+                            _find_cli, _save_gate_ok, restore_native,
+                        )
+
+                        cli = _find_cli()
+                        if cli and not _save_gate_ok(cli, root_sch):
+                            if restore_native(output_path, project_base_name):
+                                success_result["renderer"] = (
+                                    "native (fallback: post-ERC save gate failed)"
+                                )
+                                success_result.pop("native_ref", None)
+                                context_logger.warning(
+                                    "Post-ERC save gate FAILED on the skidl render; "
+                                    "restored the native output.",
+                                    component="CIRCUIT",
+                                )
+                    except Exception as e:
+                        context_logger.warning(
+                            f"Post-ERC save verification skipped: {e}",
                             component="CIRCUIT",
                         )
 

@@ -222,3 +222,44 @@ def test_render_hierarchical_has_wires_and_equivalent(
 
     result = compare_netlists(cs_net, sk_net)
     assert result.equivalent, "\n".join(result.messages)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 19 Phase E: generate_kicad_project(renderer="skidl") + gate + fallback
+# --------------------------------------------------------------------------- #
+
+
+def test_generate_project_renderer_skidl_installs(
+    tmp_path, kicad_cli, skidl_python, monkeypatch
+):
+    monkeypatch.setenv("CIRCUIT_SYNTH_SKIDL_PYTHON", skidl_python)
+    proj = tmp_path / "divider_skidl"
+    res = _divider().generate_kicad_project(
+        project_name=str(proj), generate_pcb=False, force_regenerate=True,
+        renderer="skidl",
+    )
+    assert res["success"] is True
+    assert res["renderer"] == "skidl", f"expected skidl install, got {res['renderer']}"
+    # Native kept as the fallback.
+    assert (proj / "native_ref").is_dir()
+    assert list((proj / "native_ref").glob("*.kicad_sch"))
+    # The installed schematic is routed and equivalent.
+    assert _wire_count(proj) > 0
+    assert res["netlist_equivalence"] is not None and res["netlist_equivalence"].equivalent
+
+
+def test_generate_project_hierarchical_renderer_skidl(
+    tmp_path, kicad_cli, skidl_python, monkeypatch
+):
+    monkeypatch.setenv("CIRCUIT_SYNTH_SKIDL_PYTHON", skidl_python)
+    proj = tmp_path / "hier_skidl"
+    res = _hier().generate_kicad_project(
+        project_name=str(proj), generate_pcb=False, force_regenerate=True,
+        renderer="skidl",
+    )
+    assert res["success"] is True
+    assert res["renderer"] == "skidl", f"got {res['renderer']}"
+    # Multi-sheet render installed (top + at least one child).
+    assert len(list(proj.glob("*.kicad_sch"))) >= 2
+    assert _wire_count(proj) > 0
+    assert res["netlist_equivalence"].equivalent
