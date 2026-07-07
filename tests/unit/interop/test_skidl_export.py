@@ -115,6 +115,27 @@ def test_export_seed_placement_emitted_only_when_true(tmp_path):
     assert "seed_placement=True" in on
 
 
+def test_export_small_subcircuit_max_keeps_wires_by_default(tmp_path):
+    # Default 0 -> small hierarchical sheets keep their wires (skidl's cosmetic
+    # blanket-stub of <=6-net subcircuits is disabled).
+    default = export_skidl_script(_divider(), tmp_path / "def_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    assert "auto_stub_small_subcircuit_max=0" in default
+
+    # Explicit override is emitted verbatim.
+    override = export_skidl_script(
+        _divider(), tmp_path / "ov_skidl.py", small_subcircuit_max=6
+    ).read_text(encoding="utf-8")
+    assert "auto_stub_small_subcircuit_max=6" in override
+
+    # Absent when auto_stub is off (the option is meaningless without it).
+    no_stub = export_skidl_script(
+        _divider(), tmp_path / "ns_skidl.py", auto_stub=False
+    ).read_text(encoding="utf-8")
+    assert "auto_stub_small_subcircuit_max" not in no_stub
+
+
 def test_export_empty_circuit_raises(tmp_path):
     @circuit(name="Empty")
     def _empty():
