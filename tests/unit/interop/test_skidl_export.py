@@ -101,6 +101,20 @@ def test_export_flatness_and_auto_stub_are_configurable(tmp_path):
     assert "auto_stub=False" in text
 
 
+def test_export_seed_placement_emitted_only_when_true(tmp_path):
+    # Default False -> the kwarg is absent (stock-skidl compatible).
+    off = export_skidl_script(_divider(), tmp_path / "off_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    assert "seed_placement" not in off
+
+    # Enabled -> the emitted generate_schematic call carries seed_placement=True.
+    on = export_skidl_script(
+        _divider(), tmp_path / "on_skidl.py", seed_placement=True
+    ).read_text(encoding="utf-8")
+    assert "seed_placement=True" in on
+
+
 def test_export_empty_circuit_raises(tmp_path):
     @circuit(name="Empty")
     def _empty():

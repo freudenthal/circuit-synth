@@ -145,6 +145,7 @@ def _render_script_text(
     flatness: float,
     auto_stub: bool,
     symbol_dir: str,
+    seed_placement: bool = False,
 ) -> str:
     groups = _iter_groups(circuit)
     if not groups:
@@ -245,6 +246,10 @@ def _render_script_text(
     w(f"        flatness={float(flatness)!r},")
     w(f"        auto_stub={bool(auto_stub)!r},")
     w('        auto_stub_fallback="labels",')
+    # Emit the seed kwarg ONLY when enabled, so scripts stay compatible with a
+    # stock skidl that doesn't know the option (stage 19).
+    if seed_placement:
+        w("        seed_placement=True,")
     w("    )")
     w('    print("SKIDL_RENDER_OK")')
     w("")
@@ -261,6 +266,7 @@ def export_skidl_script(
     flatness: float = 0.0,
     auto_stub: bool = True,
     symbol_dir: Optional[str] = None,
+    seed_placement: bool = False,
 ) -> Path:
     """Emit a standalone SKiDL script that renders *circuit* to a ``.kicad_sch``.
 
@@ -281,6 +287,7 @@ def export_skidl_script(
         flatness=flatness,
         auto_stub=auto_stub,
         symbol_dir=symbol_dir or DEFAULT_KICAD_SYMBOL_DIR,
+        seed_placement=seed_placement,
     )
     out_path.write_text(text, encoding="utf-8")
     logger.info("Wrote SKiDL export script to %s", out_path)
@@ -315,6 +322,7 @@ def render_with_skidl(
     flatness: float = 0.0,
     auto_stub: bool = True,
     symbol_dir: Optional[str] = None,
+    seed_placement: bool = False,
     timeout: int = 600,
 ) -> Path:
     """Render *circuit* to a wire-routed ``.kicad_sch`` set under *out_dir* via SKiDL.
@@ -339,6 +347,7 @@ def render_with_skidl(
         flatness=flatness,
         auto_stub=auto_stub,
         symbol_dir=symbol_dir,
+        seed_placement=seed_placement,
     )
 
     exe = python_exe or os.environ.get(SKIDL_PYTHON_ENV) or sys.executable

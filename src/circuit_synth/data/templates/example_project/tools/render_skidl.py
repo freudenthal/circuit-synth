@@ -24,7 +24,9 @@ If skidl is not available there, this prints ``SKIDL_UNAVAILABLE: <reason>`` and
 exits 2 (not a crash), so callers can degrade gracefully.
 
 Copy this pattern for your own design: import your ``@circuit`` function, build it,
-then call ``render_with_skidl(circuit, out_dir="skidl_render")``.
+then call ``render_with_skidl(circuit, out_dir="skidl_render")``. Pass
+``seed_placement=True`` to use the stage-19 constructive seed placement (a
+deterministic, pin-geometry-aware initial placement) instead of random.
 """
 
 import sys
