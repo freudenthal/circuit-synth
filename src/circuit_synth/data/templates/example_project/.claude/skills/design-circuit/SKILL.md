@@ -80,11 +80,31 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   names auto-become power symbols), `component[pin] += net`.
 - In `__main__`: `generate_kicad_project(project_name=..., generate_pcb=False)`.
   Do NOT call gerber functions (unavailable in this build).
+- **Readable output = hierarchy first, renderer second.** A flat sheet with more
+  than ~20 parts is unreadable no matter how it is placed or routed — the
+  structural fix is hierarchy, not the renderer. Decompose the design into
+  functional-block sub-circuits (below); aim for **one block ≈ one sheet ≈ ~≤20
+  parts ≈ one readable page**. Only then does the routed renderer help.
+- **Routed schematic (optional):** `generate_kicad_project(..., renderer="skidl")`
+  emits a wire-routed schematic instead of the default `renderer="native"`. It
+  requires a skidl-capable interpreter (set `CIRCUIT_SYNTH_SKIDL_PYTHON`), and it
+  self-guards: the render is installed only if it is **netlist-equivalent** to the
+  native render AND passes the save gate, otherwise it **falls back to native**
+  with a warning (the native render is always kept in `<project>/native_ref/`).
+  Check `result["renderer"]` to see which was installed. Not needed for
+  correctness or simulation — Python stays the source of truth either way.
+  Current limitation: the renderer draws real wires on **single-sheet** designs
+  (one flat `@circuit` of ~≤20 parts routes cleanly); **hierarchical** multi-sheet
+  designs currently render label-based per sheet (readable via functional
+  separation, but not yet wired). So for the most readable output today, prefer
+  small designs / one focused sheet when you want wires, and hierarchy when you
+  want functional-block organization.
 - **Multi-sheet / hierarchical designs.** Split into sheets when the design has
   distinct functional blocks (power, MCU, analog front-end, ...), the user asks
-  for it, or it exceeds ~15 components. Pattern: write one `@circuit` function
-  per block, and a top `@circuit` that creates the *shared* nets and calls each
-  block, **passing the same `Net` objects** into the blocks that must connect:
+  for it, or it exceeds ~15–20 components (see readability note above). Pattern:
+  write one `@circuit` function per block, and a top `@circuit` that creates the
+  *shared* nets and calls each block, **passing the same `Net` objects** into the
+  blocks that must connect:
 
   ```python
   @circuit(name="psu")
