@@ -1075,7 +1075,7 @@ class SpiceConverter:
     # op-amp symbols (e.g. ADA4817 pin 2 is FB). Prefer a pin not named these.
     _OPAMP_NON_OUTPUT_PIN_NAMES = {"FB", "COMP"}
 
-    def _opamp_terminals(self, component):
+    def _opamp_terminals(self, component, pin_nums=None):
         """Resolve an op-amp's (out, in+, in-) SPICE nodes by pin function/name.
 
         Op-amp pins must be mapped semantically, not by position: KiCad pinouts
@@ -1085,13 +1085,19 @@ class SpiceConverter:
         Power pins (V+/V-) are not needed by the ideal model. Returns
         (out, in_plus, in_minus) spice nodes, or None if a signal terminal is
         missing or no live pin map is available.
+
+        ``pin_nums`` (a set of pin-number strings) restricts resolution to one
+        unit of a multi-unit symbol, so each amplifier section of a dual/quad
+        gets its own terminals instead of all units collapsing together.
         """
         pin_map = getattr(component, "_pins", None)
         if not isinstance(pin_map, dict):
             return None
         outputs = []  # (pin_name, node) for every connected output-func pin
         in_plus = in_minus = None
-        for pin in pin_map.values():
+        for num, pin in pin_map.items():
+            if pin_nums is not None and str(num) not in pin_nums:
+                continue  # a different unit's pin
             net = getattr(pin, "net", None)
             if net is None:
                 continue  # unconnected (e.g. the unused unit of a dual op-amp)
@@ -1141,12 +1147,65 @@ class SpiceConverter:
             )
         return chosen_node
 
+    def _opamp_amp_units(self, component):
+        """``{unit_number: {pin_numbers}}`` for the amplifier units of a
+        multi-unit op-amp symbol -- units with at least one input pin AND one
+        output pin. Power-only units (e.g. LM358 unit 3 = V+/V-) are excluded;
+        the ideal/GBW model ignores supply pins.
+
+        Returns ``{}`` when the symbol resolves to a single unit or can't be
+        resolved, so the caller keeps the whole-component path. The pin->unit
+        map is read from the KiCad symbol (Component.Pin.unit is not populated),
+        the same source the schematic writer uses to place per-unit bodies.
+        """
+        symbol = self._attr(component, "symbol", None) or getattr(
+            component, "symbol", None
+        )
+        if not symbol:
+            return {}
+        try:
+            from circuit_synth.kicad.kicad_symbol_cache import SymbolLibCache
+
+            data = SymbolLibCache.get_symbol_data(symbol)
+        except Exception:
+            return {}
+        if not data or data.get("unit_count", 1) <= 1:
+            return {}
+        unit_pins = {}  # unit -> {pin number strings}
+        unit_has = {}  # unit -> {"in": bool, "out": bool}
+        for p in data.get("pins", []):
+            num = str(p.get("number", "")).strip()
+            unit = p.get("unit", 0)
+            if not num or not unit:  # unit 0 = common-to-all; not an amp section
+                continue
+            func = str(p.get("function", "")).lower()
+            name = (p.get("name", "") or "").strip()
+            unit_pins.setdefault(unit, set()).add(num)
+            flags = unit_has.setdefault(unit, {"in": False, "out": False})
+            if "output" in func:
+                flags["out"] = True
+            elif "input" in func or name in ("+", "-"):
+                flags["in"] = True
+        return {
+            u: pins
+            for u, pins in unit_pins.items()
+            if unit_has.get(u, {}).get("in") and unit_has.get(u, {}).get("out")
+        }
+
     def _add_opamp(self, component, ref: str, value: str):
         """Add an op-amp: ideal VCVS by default, 1-pole GBW macromodel when opted in.
 
         Terminals are resolved by pin function/name so the model is correct
         regardless of the symbol's pin numbering. Falls back to a positional guess
         only when no live pin map is available (dict/JSON-shaped circuits).
+
+        A **multi-unit** symbol (dual/quad) with more than one wired amplifier
+        section emits **one model per wired unit** -- otherwise both halves of a
+        dual collapse into a single VCVS, leaving the second section's output net
+        undriven (singular matrix, hard sim failure; bug #A). The first
+        amplifier unit keeps the plain ``ref`` element name for netlist
+        backward-compatibility; later units get ``{ref}u{unit}``. The die's GBW
+        (if any) applies to every unit.
 
         Without a gain-bandwidth product the op-amp is an ideal VCVS with
         frequency-independent gain ``OPAMP_OPEN_LOOP_GAIN`` (exactly as before). With
@@ -1155,6 +1214,41 @@ class SpiceConverter:
         macromodel so source/feedback capacitance limits bandwidth and can peak. Slew
         rate is out of scope (nonlinear); this models only the small-signal pole.
         """
+        gbw_hz, tier = self._opamp_gbw(component, value)
+
+        amp_units = self._opamp_amp_units(component)
+        pin_map = getattr(component, "_pins", None)
+        # Per-unit emission only when there are 2+ amplifier units AND a live pin
+        # map to resolve each unit's terminals; otherwise the whole-component
+        # path (incl. the dict/JSON positional fallback) runs unchanged.
+        if len(amp_units) > 1 and isinstance(pin_map, dict):
+            emitted = 0
+            for unit in sorted(amp_units):
+                unit_pins = amp_units[unit]
+                wired = any(
+                    getattr(pin, "net", None) is not None
+                    for num, pin in pin_map.items()
+                    if str(num) in unit_pins
+                )
+                if not wired:
+                    continue  # unused spare section -- fine to leave unmodeled
+                terminals = self._opamp_terminals(component, pin_nums=unit_pins)
+                if terminals is None:
+                    logger.warning(
+                        f"Op-amp {ref} unit {unit} is partially wired (missing an "
+                        f"input or output terminal); skipping this section"
+                    )
+                    continue
+                out, in_plus, in_minus = terminals
+                elem_ref = ref if emitted == 0 else f"{ref}u{unit}"
+                self._emit_opamp_model(elem_ref, out, in_plus, in_minus, gbw_hz)
+                emitted += 1
+            if emitted:
+                self._record_opamp_provenance(ref, tier, gbw_hz, units=emitted)
+                return
+            # Nothing wired -> fall through to the single-model path (which will
+            # warn about too-few connections), preserving prior behavior.
+
         terminals = self._opamp_terminals(component)
         if terminals is None:
             nodes = self._get_component_nodes(component)
@@ -1168,20 +1262,29 @@ class SpiceConverter:
         else:
             out, in_plus, in_minus = terminals
 
-        gbw_hz, tier = self._opamp_gbw(component, value)
+        self._emit_opamp_model(ref, out, in_plus, in_minus, gbw_hz)
+        self._record_opamp_provenance(ref, tier, gbw_hz, units=1)
+
+    def _emit_opamp_model(self, elem_ref, out, in_plus, in_minus, gbw_hz):
+        """Emit one op-amp section: ideal VCVS, or the 1-pole GBW macromodel."""
         if gbw_hz is None:
-            self._add_ideal_opamp(ref, out, in_plus, in_minus)
-            self.model_provenance[ref] = ResolvedModel(
-                ref=ref, kind="opamp", tier="generic", name="ideal_vcvs"
-            )
+            self._add_ideal_opamp(elem_ref, out, in_plus, in_minus)
         else:
-            self._add_gbw_opamp(ref, out, in_plus, in_minus, gbw_hz)
-            self.model_provenance[ref] = ResolvedModel(
-                ref=ref,
-                kind="opamp",
-                tier=tier,
-                name=f"gbw_1pole({self._fmt_hz(gbw_hz)})",
-            )
+            self._add_gbw_opamp(elem_ref, out, in_plus, in_minus, gbw_hz)
+
+    def _record_opamp_provenance(self, ref, tier, gbw_hz, units):
+        """One provenance entry per op-amp ref (not per unit). Notes the wired
+        unit count when more than one section was modeled."""
+        if gbw_hz is None:
+            name = "ideal_vcvs"
+            tier = "generic"
+        else:
+            name = f"gbw_1pole({self._fmt_hz(gbw_hz)})"
+        if units > 1:
+            name = f"{name} x{units} units"
+        self.model_provenance[ref] = ResolvedModel(
+            ref=ref, kind="opamp", tier=tier, name=name
+        )
 
     def _add_ideal_opamp(self, ref, out, in_plus, in_minus):
         """Ideal op-amp: a single high-gain VCVS (unchanged legacy behaviour)."""
@@ -1568,7 +1671,7 @@ class SpiceConverter:
         params = self._transformer_params(component)
         if params is None or params["K"] is None:
             logger.warning(
-                f'transformer {ref}: unresolved winding params - skipping '
+                f"transformer {ref}: unresolved winding params - skipping "
                 f'(set Sim.Params="lp=100u n=0.5")'
             )
             return
@@ -1743,15 +1846,14 @@ class SpiceConverter:
             return
         params = self._switcher_params(component, value, topology)
         if params is None:
-            need = (
-                "VOUT/FSW/N" if topology == "flyback" else "VOUT/FSW"
-            )
+            need = "VOUT/FSW/N" if topology == "flyback" else "VOUT/FSW"
             example = (
-                'fsw=100k vout=5 n=0.5' if topology == "flyback"
-                else 'fsw=500k vout=3.3'
+                "fsw=100k vout=5 n=0.5"
+                if topology == "flyback"
+                else "fsw=500k vout=3.3"
             )
             logger.warning(
-                f'{topology} {ref}: no {need} resolved - skipping '
+                f"{topology} {ref}: no {need} resolved - skipping "
                 f'(set Sim.Params="{example}")'
             )
             return
@@ -1869,7 +1971,7 @@ class SpiceConverter:
         avg = self._averaged_params(component)
         if avg is None:
             logger.warning(
-                f'buck {ref}: MODE=avg needs Sim.Params VREF (the reference the '
+                f"buck {ref}: MODE=avg needs Sim.Params VREF (the reference the "
                 f'divider tap regulates to), e.g. "vref=0.8" - skipping'
             )
             return
@@ -2741,18 +2843,21 @@ class SpiceConverter:
                     f"{ref}: {kind} needs connected SW, VIN and GND pins "
                     f"(resolved by pin name)"
                 )
-            if self._switcher_params(
-                component, self._attr(component, "value", None), kind
-            ) is None:
+            if (
+                self._switcher_params(
+                    component, self._attr(component, "value", None), kind
+                )
+                is None
+            ):
                 if kind == "flyback":
                     problems.append(
-                        f'{ref}: flyback needs Sim.Params with VOUT, FSW and N '
-                        f'(the transformer turns ratio Ns/Np), e.g. '
+                        f"{ref}: flyback needs Sim.Params with VOUT, FSW and N "
+                        f"(the transformer turns ratio Ns/Np), e.g. "
                         f'Sim.Params="fsw=100k vout=5 n=0.5"'
                     )
                 else:
                     problems.append(
-                        f'{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. '
+                        f"{ref}: {kind} needs Sim.Params with VOUT and FSW, e.g. "
                         f'Sim.Params="fsw=500k vout=3.3"'
                     )
 
@@ -2774,13 +2879,11 @@ class SpiceConverter:
             params = self._transformer_params(component)
             if params is None:
                 problems.append(
-                    f'{ref}: transformer needs Sim.Params with LP and N (or LS), '
+                    f"{ref}: transformer needs Sim.Params with LP and N (or LS), "
                     f'e.g. Sim.Params="lp=100u n=0.5"'
                 )
             elif params["K"] is None:
-                problems.append(
-                    f"{ref}: transformer coupling k must be in (0, 1]"
-                )
+                problems.append(f"{ref}: transformer coupling k must be in (0, 1]")
 
         # 5. Every diode/BJT/MOSFET must reference a model that resolves to a
         #    built-in generic (otherwise ngspice errors on an undefined model).
