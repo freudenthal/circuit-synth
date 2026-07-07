@@ -37,6 +37,11 @@ import click
 # editable. Lets the dev machine use the fork without hardcoding a path anywhere.
 FORK_ENV_VAR = "CIRCUIT_SYNTH_FORK"
 
+# Same idea for the sibling kicad-sch-api fork. In --editable mode the project's
+# .venv otherwise resolves kicad-sch-api from PyPI (0.5.5), which lacks the fork's
+# save-crash fixes (instance project-name consistency, zero-length-wire guard).
+KSA_FORK_ENV_VAR = "KICAD_SCH_API_FORK"
+
 # uv rejects package names with a leading underscore; keep to a sane subset.
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
@@ -59,7 +64,9 @@ def _run(cmd: List[str], cwd: Optional[Path] = None) -> None:
             f"and try again."
         )
     if result.returncode != 0:
-        raise click.ClickException(f"step failed (exit {result.returncode}): {printable}")
+        raise click.ClickException(
+            f"step failed (exit {result.returncode}): {printable}"
+        )
 
 
 def _resolve_editable(editable: Optional[str]) -> Optional[str]:
@@ -80,6 +87,32 @@ def _resolve_editable(editable: Optional[str]) -> Optional[str]:
     return str(path)
 
 
+def _resolve_ksa_fork(
+    cs_fork_path: Optional[str], ksa_editable: Optional[str]
+) -> Optional[str]:
+    """Absolute path to a local kicad-sch-api fork to install editable, or None.
+
+    Only consulted in editable mode. Precedence: explicit ``--ksa-editable`` /
+    ``KICAD_SCH_API_FORK`` wins; otherwise a **sibling checkout**
+    ``<cs_fork>/../kicad-sch-api``. Returns None (PyPI kicad-sch-api) when neither
+    resolves. An explicit path without a ``pyproject.toml`` is an error; a missing
+    sibling is not (it just means "no fork available").
+    """
+    candidate = ksa_editable or os.environ.get(KSA_FORK_ENV_VAR)
+    if not candidate and cs_fork_path:
+        sibling = Path(cs_fork_path).resolve().parent / "kicad-sch-api"
+        if (sibling / "pyproject.toml").exists():
+            candidate = str(sibling)
+    if not candidate:
+        return None
+    path = Path(candidate).expanduser().resolve()
+    if not (path / "pyproject.toml").exists():
+        raise click.ClickException(
+            f"kicad-sch-api source '{path}' is not a Python project (no pyproject.toml)"
+        )
+    return str(path)
+
+
 @click.command()
 @click.argument("project_name")
 @click.option(
@@ -95,6 +128,16 @@ def _resolve_editable(editable: Optional[str]) -> Optional[str]:
     help=(
         "Install circuit-synth editable from this local checkout instead of PyPI "
         f"(dev use). Falls back to the {FORK_ENV_VAR} env var."
+    ),
+)
+@click.option(
+    "--ksa-editable",
+    type=str,
+    default=None,
+    help=(
+        "Install kicad-sch-api editable from this local checkout (editable mode "
+        f"only). Falls back to the {KSA_FORK_ENV_VAR} env var, then a sibling "
+        "../kicad-sch-api checkout."
     ),
 )
 @click.option(
@@ -121,6 +164,7 @@ def main(
     project_name: str,
     base_dir: Optional[str],
     editable: Optional[str],
+    ksa_editable: Optional[str],
     pypi_spec: str,
     circuits: Optional[str],
     no_agents: bool,
@@ -144,9 +188,7 @@ def main(
 
     fork_path = _resolve_editable(editable)
     source_desc = f"editable fork {fork_path}" if fork_path else f"PyPI ({pypi_spec})"
-    click.secho(
-        f"Creating circuit-synth project '{project_name}' in {base}", fg="cyan"
-    )
+    click.secho(f"Creating circuit-synth project '{project_name}' in {base}", fg="cyan")
     click.secho(f"  circuit-synth source: {source_desc}", fg="cyan")
 
     # 1. uv init
@@ -155,6 +197,21 @@ def main(
     # 2. install circuit-synth (editable fork for dev, else PyPI)
     if fork_path:
         _run(["uv", "add", "--editable", fork_path], cwd=project_path)
+        # 2b. In editable mode also wire the sibling kicad-sch-api fork through
+        #     pyproject/uv.lock so it survives `uv run` re-syncs. Without this the
+        #     .venv resolves PyPI kicad-sch-api 0.5.5, which lacks the fork's
+        #     save-crash fixes (mixed instance project names -> KiCad save crash).
+        ksa_fork = _resolve_ksa_fork(fork_path, ksa_editable)
+        if ksa_fork:
+            click.secho(f"  kicad-sch-api source: editable fork {ksa_fork}", fg="cyan")
+            _run(["uv", "add", "--editable", ksa_fork], cwd=project_path)
+        else:
+            click.secho(
+                "  kicad-sch-api will come from PyPI (0.5.5), which lacks the "
+                "fork's save-crash fixes; set KICAD_SCH_API_FORK or check out "
+                "../kicad-sch-api next to the circuit-synth fork.",
+                fg="yellow",
+            )
     else:
         _run(["uv", "add", pypi_spec], cwd=project_path)
 
@@ -178,11 +235,7 @@ def main(
 
 def _verify_schematic(project_path: Path) -> None:
     """Warn (don't fail) if generation didn't produce a real schematic."""
-    scharts = [
-        p
-        for p in project_path.rglob("*.kicad_sch")
-        if ".venv" not in p.parts
-    ]
+    scharts = [p for p in project_path.rglob("*.kicad_sch") if ".venv" not in p.parts]
     if not scharts:
         click.secho(
             "  note: no .kicad_sch was produced (open the project and run main.py "
@@ -203,7 +256,9 @@ def _print_next_steps(project_path: Path, generated: bool) -> None:
     click.secho("\nProject ready.", fg="green", bold=True)
     click.echo(f"  Location: {project_path}")
     if generated:
-        click.echo("  Generated: KiCad schematic + BOM + PDF (open the .kicad_pro in KiCad 10).")
+        click.echo(
+            "  Generated: KiCad schematic + BOM + PDF (open the .kicad_pro in KiCad 10)."
+        )
     click.echo(
         "\nTo design a circuit conversationally, open THIS folder as the workspace\n"
         "in Claude Code (that activates the project's design-circuit skill and the\n"
