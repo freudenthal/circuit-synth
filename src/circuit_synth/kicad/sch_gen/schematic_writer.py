@@ -96,14 +96,10 @@ from kicad_sch_api.core.types import (
 )
 from sexpdata import Symbol
 
-# Import symbol cache for multi-unit component support
-from ..core.symbol_cache import get_symbol_cache
-
+# Import Python symbol cache specifically for graphics data
 # Use optimized symbol cache from kicad_symbol_cache for better performance,
 # but keep Python fallback for graphics data
 from circuit_synth.kicad.kicad_symbol_cache import SymbolLibCache
-
-# Import Python symbol cache specifically for graphics data
 from circuit_synth.kicad.kicad_symbol_cache import (
     SymbolLibCache as PythonSymbolLibCache,
 )
@@ -113,6 +109,9 @@ from circuit_synth.kicad.schematic.placement import PlacementEngine, PlacementSt
 
 # Import existing dependencies
 from ...core.circuit import Circuit
+
+# Import symbol cache for multi-unit component support
+from ..core.symbol_cache import get_symbol_cache
 from .collision_manager import SHEET_MARGIN
 from .integrated_reference_manager import IntegratedReferenceManager
 
@@ -134,9 +133,7 @@ def generate_component_sexp(component_data):
     # CRITICAL FIX: Never use hard-coded fallbacks - always preserve original reference
     ref = component_data.get("ref")
     if not ref:
-        logger.error(
-            f"GENERATE_COMPONENT_SEXP: NO REFERENCE found in component_data!"
-        )
+        logger.error(f"GENERATE_COMPONENT_SEXP: NO REFERENCE found in component_data!")
         logger.error(
             f"GENERATE_COMPONENT_SEXP: This indicates a bug in component processing"
         )
@@ -324,7 +321,9 @@ class SchematicWriter:
         )
 
         # Initialize KiCad API managers
-        self.component_manager = ComponentManager(self.schematic, project_name=self.project_name)
+        self.component_manager = ComponentManager(
+            self.schematic, project_name=self.project_name
+        )
         self.placement_engine = PlacementEngine(self.schematic)
 
         # Initialize S-expression parser
@@ -355,15 +354,11 @@ class SchematicWriter:
         # CRITICAL DEBUG: Log hierarchical path for UUID fix verification
         import sys
 
-        logger.debug(
-            f"\nWRITER_INIT: Circuit='{circuit.name}'"
-        )
+        logger.debug(f"\nWRITER_INIT: Circuit='{circuit.name}'")
         logger.debug(
             f"WRITER_INIT:   Hierarchical path={self.hierarchical_path}",
         )
-        logger.debug(
-            f"WRITER_INIT:   Self UUID={self.uuid_top}"
-        )
+        logger.debug(f"WRITER_INIT:   Self UUID={self.uuid_top}")
         if self.hierarchical_path and len(self.hierarchical_path) > 0:
             logger.debug(
                 f"WRITER_INIT:   Root UUID (path[0])={self.hierarchical_path[0]}",
@@ -622,6 +617,10 @@ class SchematicWriter:
 
             # Add component using the API - for multi-unit, add each unit separately
             # Time the component manager operation
+            first_api_component = None
+            # Every placed unit body, as (unit_num, api_component). Multi-unit
+            # symbols place several bodies; each needs a rooted instance path.
+            placed_units: list = []
             with timed_operation(
                 f"add_component[{comp.lib_id}]", threshold_ms=20, details=comp_details
             ):
@@ -662,9 +661,11 @@ class SchematicWriter:
                             **user_properties,  # Pass user properties
                         )
 
-                        if api_component and unit_num == 1:
-                            # Store the first unit as the main component for mapping
-                            first_api_component = api_component
+                        if api_component:
+                            placed_units.append((unit_num, api_component))
+                            if unit_num == 1:
+                                # First unit is the main component for mapping
+                                first_api_component = api_component
                 else:
                     # Single-unit component - add as before
                     api_component = self.component_manager.add_component(
@@ -678,6 +679,8 @@ class SchematicWriter:
                         **user_properties,  # Pass user properties
                     )
                     first_api_component = api_component
+                    if api_component:
+                        placed_units.append((1, api_component))
 
             if first_api_component:
                 # Update our mapping (use the first unit for UUID mapping)
@@ -686,114 +689,73 @@ class SchematicWriter:
                 # Update the original component reference
                 comp.reference = new_ref
 
-                # Copy additional properties to first unit
-                first_api_component.rotation = comp.rotation
-                # Note: unit is already set during add_component call
-                first_api_component.in_bom = getattr(comp, "in_bom", True)
-                first_api_component.on_board = getattr(comp, "on_board", True)
-                # dnp and mirror may not exist in kicad-sch-api SchematicSymbol
-                if hasattr(first_api_component, "dnp") and hasattr(comp, "dnp"):
-                    first_api_component.dnp = comp.dnp
-                if hasattr(first_api_component, "mirror") and hasattr(comp, "mirror"):
-                    first_api_component.mirror = comp.mirror
-
-                # Store hierarchy path and project name for instances generation
-                # These are INTERNAL properties - hidden from user view but retained for parsing
-                if self.hierarchical_path:
-                    hierarchy_path_value = "/" + "/".join(self.hierarchical_path)
-                    first_api_component.properties["hierarchy_path"] = hierarchy_path_value
-                    # Mark as hidden so it doesn't clutter the schematic
-                    first_api_component.hidden_properties.add("hierarchy_path")
-                    logger.debug(f"  Storing hidden hierarchy_path property: {hierarchy_path_value}")
-
-                # Store project name for the instances section in new KiCad format
-                # Hidden from user view but retained for parsing
-                first_api_component.properties["project_name"] = self.project_name
-                first_api_component.hidden_properties.add("project_name")
-                logger.debug(f"  Storing hidden project_name property: {self.project_name}")
-
-                # CRITICAL: Store root UUID for instances path generation
-                # The parser needs this to create correct instance paths
-                # Hidden from user view but retained for parsing
+                # Compute the instance path once -- shared by every unit body.
+                # Component instances MUST use the FULL hierarchical path (root
+                # UUID + all sheet symbol UUIDs) so KiCad annotates references
+                # correctly (avoids "?" display).
                 if self.hierarchical_path and len(self.hierarchical_path) > 0:
-                    root_uuid = self.hierarchical_path[0]
-                    first_api_component.properties["root_uuid"] = root_uuid
-                    first_api_component.hidden_properties.add("root_uuid")
-                    logger.debug(f"  Storing hidden root_uuid property: {root_uuid}")
-
-                # Create instances for the new KiCad format (20250114+)
-                # The path should contain only sheet UUIDs, not component UUID
-                logger.debug(f"=== CREATING INSTANCE FOR COMPONENT {new_ref} ===")
-                logger.debug(f"  Component lib_id: {comp.lib_id}")
-                logger.debug(f"  Component UUID: {first_api_component.uuid}")
-                logger.debug(f"  Current circuit: {self.circuit.name}")
-                logger.debug(f"  Hierarchical path: {self.hierarchical_path}")
-                logger.debug(
-                    f"  Hierarchical path length: {len(self.hierarchical_path) if self.hierarchical_path else 0}"
-                )
-
-                # Add path validation
-                if self.hierarchical_path:
-                    logger.debug(f"  Path UUIDs:")
-                    for i, uuid in enumerate(self.hierarchical_path):
-                        logger.debug(f"    [{i}]: {uuid}")
-
-                # CRITICAL FIX FOR KICAD ANNOTATION:
-                # Component instances MUST use the FULL hierarchical path
-                # This includes the root UUID + all sheet symbol UUIDs in the path
-                # For KiCad to properly annotate references (avoid "?" display)
-                if self.hierarchical_path and len(self.hierarchical_path) > 0:
-                    # Use the FULL hierarchical path (root + all sheet symbols)
-                    # The hierarchical_path contains [root_uuid, sheet_symbol_uuid, sub_sheet_symbol_uuid, ...]
-                    # For USB_Port: [root_uuid, usb_port_sheet_symbol_uuid]
-                    # For nested sheets like LED_Blinker: [root_uuid, esp32_mcu_sheet_symbol_uuid, led_blinker_sheet_symbol_uuid]
+                    # [root_uuid, sheet_symbol_uuid, sub_sheet_symbol_uuid, ...]
                     instance_path = "/" + "/".join(self.hierarchical_path)
-                    logger.debug(
-                        f"  Creating SUB-SHEET component instance with FULL hierarchical path: {instance_path}"
-                    )
-                    logger.debug(
-                        f"    Full hierarchical path: {self.hierarchical_path}"
-                    )
-                    logger.debug(f"    Number of levels: {len(self.hierarchical_path)}")
                 else:
                     # Root sheet - use schematic UUID in path
                     instance_path = f"/{self.schematic.uuid}"
-                    logger.debug(
-                        f"  Creating ROOT SHEET instance with path: {instance_path}"
+                logger.debug(
+                    f"=== CREATING INSTANCE(S) FOR {new_ref} ({comp.lib_id}), "
+                    f"{len(placed_units)} unit(s), path {instance_path} ==="
+                )
+
+                # Apply per-unit properties + a rooted instance to EVERY placed
+                # unit. A multi-unit symbol (dual/quad op-amp, etc.) is placed as
+                # several unit bodies, and each carries its OWN (instances ...)
+                # block. Previously only the first unit got the hidden
+                # hierarchy/project/root properties and only the last unit got
+                # the rooted instance, so the remaining units kept
+                # kicad-sch-api's default (path "/") -- a dangling hierarchy ref
+                # that null-derefs KiCad's writer on SAVE (segfault + 0-byte
+                # file). Stamp all of them uniformly. (component_uuid_map still
+                # points at unit 1, above; BOM/netlist mapping is per-reference.)
+                for unit_num, unit_component in placed_units:
+                    # in_bom/on_board/dnp/mirror mirror to every unit (KiCad
+                    # treats the placed units of one part symmetrically);
+                    # rotation applies to each placed unit as-is.
+                    unit_component.rotation = comp.rotation
+                    unit_component.in_bom = getattr(comp, "in_bom", True)
+                    unit_component.on_board = getattr(comp, "on_board", True)
+                    # dnp and mirror may not exist in kicad-sch-api SchematicSymbol
+                    if hasattr(unit_component, "dnp") and hasattr(comp, "dnp"):
+                        unit_component.dnp = comp.dnp
+                    if hasattr(unit_component, "mirror") and hasattr(comp, "mirror"):
+                        unit_component.mirror = comp.mirror
+
+                    # Hidden internal properties consumed by instances generation
+                    # (hidden from user view but retained for parsing).
+                    if self.hierarchical_path:
+                        hierarchy_path_value = "/" + "/".join(self.hierarchical_path)
+                        unit_component.properties["hierarchy_path"] = (
+                            hierarchy_path_value
+                        )
+                        unit_component.hidden_properties.add("hierarchy_path")
+                    unit_component.properties["project_name"] = self.project_name
+                    unit_component.hidden_properties.add("project_name")
+                    if self.hierarchical_path and len(self.hierarchical_path) > 0:
+                        root_uuid = self.hierarchical_path[0]
+                        unit_component.properties["root_uuid"] = root_uuid
+                        unit_component.hidden_properties.add("root_uuid")
+
+                    # Replace component_manager's default instance (which carries
+                    # the dangling "/" path) with a rooted one for this unit.
+                    unit_component.instances.clear()
+                    unit_component.instances.append(
+                        SymbolInstance(
+                            path=instance_path,
+                            reference=new_ref,
+                            unit=unit_num,
+                        )
                     )
-
-                # Clear any existing instances that might have been added by component_manager
-                # We need to control the project name ourselves
-                api_component.instances.clear()
-
-                # Create the instance
-                # CRITICAL FIX: Use consistent project naming for ALL components
-                # The inconsistency between component and sheet instances causes KiCad GUI annotation issues
-                # UNIVERSAL SOLUTION: Always use the actual project name for consistency
-                instance_project = self.project_name or "default_project"
-                logger.debug(
-                    f"UNIVERSAL_PROJECT_NAMING: Using consistent project name: '{instance_project}'"
-                )
-
-                instance = SymbolInstance(
-                    path=instance_path,
-                    reference=new_ref,
-                    unit=comp.unit,
-                )
-                api_component.instances.append(instance)
-
-                logger.debug(f"  Instance created:")
-                logger.debug(f"    - Path: {instance.path}")
-                logger.debug(f"    - Reference: {instance.reference}")
-                logger.debug(f"    - Unit: {instance.unit}")
-                logger.debug(
-                    f"  Total instances on component: {len(api_component.instances)}"
-                )
+                    logger.debug(
+                        f"  unit {unit_num}: path={instance_path} ref={new_ref}"
+                    )
                 logger.debug(f"=== END INSTANCE CREATION FOR {new_ref} ===")
-
-                logger.debug(
-                    f"Added component {new_ref} ({comp.lib_id}) at ({comp.position.x}, {comp.position.y})"
-                )
             else:
                 logger.error(f"Failed to add component {comp.reference}")
 
@@ -835,7 +797,7 @@ class SchematicWriter:
             pos = key.rfind(marker)
             if pos < 0:
                 continue
-            suffix = key[pos + len(marker):]
+            suffix = key[pos + len(marker) :]
             if not suffix.isdigit():
                 continue
             unit_num = int(suffix)
@@ -893,7 +855,9 @@ class SchematicWriter:
         # Print current positions
         logger.debug("\nComponent positions before placement:")
         for comp in self.schematic.components:
-            logger.debug(f"  {comp.reference}: ({comp.position.x:.1f}, {comp.position.y:.1f})")
+            logger.debug(
+                f"  {comp.reference}: ({comp.position.x:.1f}, {comp.position.y:.1f})"
+            )
 
         # Use text-flow placement for ALL components (ignore existing positions)
         components_needing_placement = list(self.schematic.components)
@@ -976,7 +940,9 @@ class SchematicWriter:
                 hasattr(self.circuit, "child_instances")
                 and self.circuit.child_instances
             ):
-                logger.debug(f"\nFound {len(self.circuit.child_instances)} sheets to place")
+                logger.debug(
+                    f"\nFound {len(self.circuit.child_instances)} sheets to place"
+                )
                 logger.debug(
                     f"Found {len(self.circuit.child_instances)} sheets to place"
                 )
@@ -1109,9 +1075,7 @@ class SchematicWriter:
                 # Leave components at their current positions
 
         total_time = time.perf_counter() - start_time
-        logger.info(
-            f"PLACE_COMPONENTS: PLACEMENT COMPLETE in {total_time*1000:.2f}ms"
-        )
+        logger.info(f"PLACE_COMPONENTS: PLACEMENT COMPLETE in {total_time*1000:.2f}ms")
 
     def _is_net_hierarchical(self, net_obj):
         """
@@ -1173,7 +1137,9 @@ class SchematicWriter:
             for sib in getattr(parent, "child_instances", []) or []:
                 if sib.get("sub_name") == self.circuit.name:
                     continue
-                if net_name in _net_names(self.all_subcircuits.get(sib.get("sub_name"))):
+                if net_name in _net_names(
+                    self.all_subcircuits.get(sib.get("sub_name"))
+                ):
                     return True
 
             # 3) Used by one of this sheet's own children? (non-root only)
@@ -1609,24 +1575,35 @@ class SchematicWriter:
                 # 180deg (left-side) labels read back into the component body. Apply
                 # the canonical justify to BOTH label kinds.
                 from ..schematic.label_utils import calculate_hierarchical_label_justify
+
                 net_label_justify = calculate_hierarchical_label_justify(global_angle)
 
                 # CHECK FOR DUPLICATE LABELS: Issue #559
                 # Before creating a new label, check if one already exists at this position
                 duplicate_found = False
                 if hasattr(self.schematic, "_data"):
-                    label_list_key = "hierarchical_labels" if label_type == LabelType.HIERARCHICAL else "labels"
+                    label_list_key = (
+                        "hierarchical_labels"
+                        if label_type == LabelType.HIERARCHICAL
+                        else "labels"
+                    )
                     if label_list_key in self.schematic._data:
                         for existing_label in self.schematic._data[label_list_key]:
                             # Calculate distance to existing label
                             ex_pos = existing_label.get("position", {})
                             ex_x = ex_pos.get("x", float("inf"))
                             ex_y = ex_pos.get("y", float("inf"))
-                            distance = ((ex_x - global_x) ** 2 + (ex_y - global_y) ** 2) ** 0.5
+                            distance = (
+                                (ex_x - global_x) ** 2 + (ex_y - global_y) ** 2
+                            ) ** 0.5
 
-                            if distance < 0.5:  # 0.5mm tolerance (same as PIN_LABEL_DISTANCE_TOLERANCE)
+                            if (
+                                distance < 0.5
+                            ):  # 0.5mm tolerance (same as PIN_LABEL_DISTANCE_TOLERANCE)
                                 if existing_label.get("text") == net_name:
-                                    logger.debug(f"Label '{net_name}' already exists at ({global_x}, {global_y}), skipping duplicate")
+                                    logger.debug(
+                                        f"Label '{net_name}' already exists at ({global_x}, {global_y}), skipping duplicate"
+                                    )
                                     duplicate_found = True
                                     break
 
@@ -1653,7 +1630,10 @@ class SchematicWriter:
                             self.schematic._data["hierarchical_labels"] = []
 
                         # Use canonical justification calculation from label_utils
-                        from ..schematic.label_utils import calculate_hierarchical_label_justify
+                        from ..schematic.label_utils import (
+                            calculate_hierarchical_label_justify,
+                        )
+
                         justify = calculate_hierarchical_label_justify(label.rotation)
 
                         label_dict = {
@@ -1941,7 +1921,10 @@ class SchematicWriter:
                             self.schematic._data["hierarchical_labels"] = []
 
                         # Use canonical justification calculation from label_utils
-                        from ..schematic.label_utils import calculate_hierarchical_label_justify
+                        from ..schematic.label_utils import (
+                            calculate_hierarchical_label_justify,
+                        )
+
                         justify = calculate_hierarchical_label_justify(label.rotation)
 
                         label_dict = {
@@ -2209,9 +2192,7 @@ class SchematicWriter:
         # Check if labels are available
         import sys
 
-        logger.debug(
-            f"\nBBOX: Checking for labels in schematic"
-        )
+        logger.debug(f"\nBBOX: Checking for labels in schematic")
         if hasattr(self.schematic, "labels"):
             logger.debug(
                 f"BBOX: Has labels, count: {len(self.schematic.labels)}",
@@ -2697,9 +2678,7 @@ class SchematicWriter:
         )
         # Only show error if we have components but no symbols
         if len(lib_symbols_block) <= 1 and len(self.schematic.components) > 0:
-            logger.error(
-                "lib_symbols block is EMPTY - no symbol definitions added!"
-            )
+            logger.error("lib_symbols block is EMPTY - no symbol definitions added!")
         elif len(lib_symbols_block) <= 1 and len(self.schematic.components) == 0:
             logger.info(
                 "No components in this sheet (hierarchical sheet with sub-sheets only)"
@@ -2971,13 +2950,13 @@ def write_schematic_file(schematic, out_path: str):
         logger.debug("Hiding non-essential properties (all except Reference and Value)")
         for component in schematic.components:
             # Access the raw component data
-            if hasattr(component, '_data'):
+            if hasattr(component, "_data"):
                 comp_data = component._data
             else:
                 comp_data = component
 
             # Mark all properties except Reference and Value as hidden
-            if hasattr(comp_data, 'hidden_properties'):
+            if hasattr(comp_data, "hidden_properties"):
                 for prop_name in list(component.properties.keys()):
                     if prop_name not in ("Reference", "Value"):
                         comp_data.hidden_properties.add(prop_name)
