@@ -4,7 +4,7 @@
 Usage:
     uv run python tools/simulate_filter.py
 
-Builds a first-order INVERTING active low-pass filter (R1=Rf=10k, Cf=1.5915n ->
+Builds a first-order INVERTING active low-pass filter (R1=RF=10k, CF=1.5915n ->
 fc ~= 10 kHz, passband gain = 1 / 0 dB), runs an AC sweep through circuit-synth's
 simulator, and prints the passband gain, -3 dB cutoff frequency, and high-frequency
 roll-off, then exits 0 on success. Copy this pattern to characterize your own
@@ -27,21 +27,21 @@ import sys
 
 from circuit_synth import Component, Net, circuit
 
-FC_HZ = 10_000.0  # design target: 1/(2*pi*Rf*Cf)
+FC_HZ = 10_000.0  # design target: 1/(2*pi*RF*CF)
 
 
 @circuit(name="Opamp_LowPass_Filter_Sim")
 def lowpass_filter():
-    """First-order inverting active LPF. R1=Rf=10k, Cf=1.5915n -> fc ~= 10 kHz.
+    """First-order inverting active LPF. R1=RF=10k, CF=1.5915n -> fc ~= 10 kHz.
 
     VSIN drives VIN with AC magnitude 1 V; the inverting node (NINV) is shared by
-    R1, the Rf||Cf feedback, and the op-amp inverting input; the non-inverting
+    R1, the RF||CF feedback, and the op-amp inverting input; the non-inverting
     input is grounded. LM358 unit A pinout: 1=out, 2=in-, 3=in+.
     """
     v1 = Component(symbol="Simulation_SPICE:VSIN", ref="V1", value="1V")
     r1 = Component(symbol="Device:R", ref="R1", value="10k")
-    rf = Component(symbol="Device:R", ref="Rf", value="10k")
-    cf = Component(symbol="Device:C", ref="Cf", value="1.5915nF")
+    rf = Component(symbol="Device:R", ref="RF", value="10k")
+    cf = Component(symbol="Device:C", ref="CF", value="1.5915nF")
     u1 = Component(symbol="Amplifier_Operational:LM358", ref="U1")
 
     vin = Net("VIN")

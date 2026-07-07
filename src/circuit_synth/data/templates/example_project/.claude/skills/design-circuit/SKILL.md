@@ -44,6 +44,12 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   `PYTHONUTF8=1 uv run python tools/find_symbol.py "<query>"` (add
   `--footprints` for footprints). Common: `Device:R`, `Device:C`, `Device:LED`,
   `Regulator_Linear:AMS1117-3.3`.
+- **Derived symbols (`(extends ...)`) can carry the parent's pin count/pinout.**
+  A KiCad symbol defined as `(extends "OtherPart")` inherits the parent's pins —
+  e.g. `Amplifier_Operational:ADA4807-2ARM` extends the 8-pin `LM2904`, but the
+  ADA4807-2ARMZ part is MSOP-**10**. Before wiring a derived symbol, verify its
+  pin count matches the package you intend (read the `.kicad_sym`, or use the MCP
+  `get_component_pins`); a mismatch silently mis-maps the extra pins.
 - If the kicad-sch-api MCP server is connected (see `.mcp.json`), you can confirm
   pin numbering for unfamiliar parts with its tools — e.g. `get_component_pins`,
   `find_pins_by_name`, `find_pins_by_type`. This is optional: if the server is
@@ -107,6 +113,14 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
 
 ## Phase 4 — GENERATE
 - Run: `PYTHONUTF8=1 uv run python circuit-synth/<name>.py`
+<!-- language-coupled: the @circuit(name=)/project_name= file-naming rule is circuit_synth-specific. See workingdocs/loop-boundary-contract.md rule R3. -->
+- **The generated `.kicad_sch`/`.kicad_pro` are named after `@circuit(name=...)`,
+  NOT the `project_name=` folder** (issue #358). So a design with
+  `@circuit(name="sipm_tia")` written by `generate_kicad_project(project_name=
+  "SiPM_TIA")` produces `SiPM_TIA/sipm_tia.kicad_sch`. Point ERC / save-gate /
+  sim script paths at the circuit name, not the folder name.
+<!-- /language-coupled -->
+
 - Then verify the output is real, not an empty shell:
   the emitted `.kicad_sch` must contain a `(symbol` block per component and a
   `(property "Reference" "<ref>"` for each expected reference. A schematic of
@@ -149,6 +163,28 @@ simulation measurements, PASS/FAIL per criterion, and the next action.
   and on Windows/Git-Bash never hand `kicad-cli.exe` an MSYS `/tmp/...` path (it
   silently writes 0 bytes, exit 0) — use project-relative paths. A `rc=139` here
   is a real corruption bug, not a warning.
+
+### Recurring real-part ERC errors you must fix in the Python (the autofix won't)
+The ERC-gate autofix only handles `power_pin_not_driven` (missing `PWR_FLAG`).
+The errors below are **wiring decisions** on real ICs — the autofix (correctly)
+won't guess them, so every real-part design must fix them in the Python source:
+- **Exposed pads** (`EP`/`EPAD`/`PAD` pins) → connect explicitly: **GND** for
+  regulators/converters, the **V− rail** for op-amps. Left floating they trip
+  `pin_not_connected` / `power_pin_not_driven`.
+- **Open-collector status pins** (`PGOOD`, `/FAULT`, …) → **pull up** to a rail
+  (a resistor), or add a deliberate no-connect with a note.
+- **Passive utility pins with no obvious net** (charge-pump `CP`/`C+`/`C-`,
+  noise-reduction `NR`, `BYP`) → **bypass cap per datasheet**; flag
+  "datasheet-verify" in the design log.
+- **Bonded output+feedback pins** (ADA4817-style `FB` + `OUT`, both typed
+  Output) → put the feedback network on **`FB`** and the load on **`OUT`**;
+  tying them to one net is an ERC output-output conflict even though they're
+  internally bonded.
+- **Multi-voltage programming pins** (e.g. TPS7A4701 ANY-OUT bank) → **strap per
+  datasheet** (grounded in external-FB mode); don't leave floating.
+- **Multi-unit (dual/quad) parts** are placed as **one `Component`** and now
+  simulate **per-unit automatically** — wire both halves on the same part; no
+  need to split a dual into two singles.
 
 ## Phase 5 — SIMULATE
 <!-- language-coupled: the .simulate() API and Sim.* model controls are circuit_synth-specific; the run/measure/plot/fallback *procedure* is portable. See workingdocs/loop-boundary-contract.md rule R3. -->
