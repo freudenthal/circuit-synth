@@ -299,6 +299,20 @@ def _render_script_text(
     w(f"        flatness={float(flatness)!r},")
     w(f"        auto_stub={bool(auto_stub)!r},")
     w('        auto_stub_fallback="labels",')
+    # Wired-mode re-tune (stage 24): the pin-count/distance auto_stub thresholds
+    # exist to keep the OLD capacity router alive by starving it of hard nets.
+    # The per-net A* router routes crossing-allowed on real geometry, so raise
+    # them (3->5 pins, 2000->4000 mils) to let more signal nets reach the router
+    # as WIRES instead of being pre-stubbed to labels. Power nets still stub (they
+    # become power symbols); labels remain correct connectivity for the rest.
+    if auto_stub:
+        w("        auto_stub_max_wire_pins=5,")
+        w("        auto_stub_max_wire_dist=4000,")
+        # Snap BEFORE route (stage 24): snap positions 2-pin parts on final
+        # geometry without stubbing, then the A* router wires every net that
+        # survives -- so the render is WIRED, not the classic snap-to-pin +
+        # labels (which discarded the routed wires because snap ran after route).
+        w("        snap_before_route=True,")
     # Always pin the RNG seed so the render is deterministic. Without this,
     # skidl's place.py/route.py do `random.seed(options.get("seed"))` == None ==
     # OS entropy, making every render non-deterministic by construction. Stock
