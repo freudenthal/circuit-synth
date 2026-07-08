@@ -193,6 +193,23 @@ def test_export_flatness_and_auto_stub_are_configurable(tmp_path):
     assert "auto_stub=False" in text
 
 
+def test_export_deconflict_stubs_is_default_and_retires_snap(tmp_path):
+    # Wired mode defaults to deconflict-stub (stage 25): the emitted call carries
+    # deconflict_stubs=True and does NOT carry snap_before_route.
+    default = export_skidl_script(_divider(), tmp_path / "dc_def_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    assert "deconflict_stubs=True" in default
+    assert "snap_before_route" not in default
+
+    # Opting out restores the stage-24 snap_before_route path (escape hatch).
+    opt_out = export_skidl_script(
+        _divider(), tmp_path / "dc_off_skidl.py", deconflict_stubs=False
+    ).read_text(encoding="utf-8")
+    assert "snap_before_route=True" in opt_out
+    assert "deconflict_stubs" not in opt_out
+
+
 def test_export_seed_placement_emitted_only_when_true(tmp_path):
     # Default False -> the kwarg is absent (stock-skidl compatible).
     off = export_skidl_script(_divider(), tmp_path / "off_skidl.py").read_text(

@@ -148,6 +148,7 @@ def _render_script_text(
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
     seed: int = 1,
+    deconflict_stubs: bool = True,
 ) -> str:
     groups = _iter_groups(circuit)
     if not groups:
@@ -308,11 +309,19 @@ def _render_script_text(
     if auto_stub:
         w("        auto_stub_max_wire_pins=5,")
         w("        auto_stub_max_wire_dist=4000,")
-        # Snap BEFORE route (stage 24): snap positions 2-pin parts on final
-        # geometry without stubbing, then the A* router wires every net that
-        # survives -- so the render is WIRED, not the classic snap-to-pin +
-        # labels (which discarded the routed wires because snap ran after route).
-        w("        snap_before_route=True,")
+        if deconflict_stubs:
+            # Deconflict-stub mode (stage 25) RETIRES snap: every non-power pin
+            # gets an on-grid, world-unique stub wire out of the part body and
+            # the A* router wires the ends, with per-connected-component closure
+            # labels. This kills the snap-era overlap + endpoint_off_grid
+            # warnings and the cross-net false-merge by construction. Mutually
+            # exclusive with snap_before_route.
+            w("        deconflict_stubs=True,")
+        else:
+            # Stage-24 fallback: snap BEFORE route (positions 2-pin parts on
+            # final geometry without stubbing, then A* wires what survives).
+            # Kept as an escape hatch / A-B comparison.
+            w("        snap_before_route=True,")
     # Always pin the RNG seed so the render is deterministic. Without this,
     # skidl's place.py/route.py do `random.seed(options.get("seed"))` == None ==
     # OS entropy, making every render non-deterministic by construction. Stock
@@ -347,6 +356,7 @@ def export_skidl_script(
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
     seed: int = 1,
+    deconflict_stubs: bool = True,
 ) -> Path:
     """Emit a standalone SKiDL script that renders *circuit* to a ``.kicad_sch``.
 
@@ -370,6 +380,7 @@ def export_skidl_script(
         seed_placement=seed_placement,
         small_subcircuit_max=small_subcircuit_max,
         seed=seed,
+        deconflict_stubs=deconflict_stubs,
     )
     out_path.write_text(text, encoding="utf-8")
     logger.info("Wrote SKiDL export script to %s", out_path)
@@ -407,6 +418,7 @@ def render_with_skidl(
     seed_placement: bool = False,
     small_subcircuit_max: int = 0,
     seed: int = 1,
+    deconflict_stubs: bool = True,
     timeout: int = 600,
 ) -> Path:
     """Render *circuit* to a wire-routed ``.kicad_sch`` set under *out_dir* via SKiDL.
@@ -434,6 +446,7 @@ def render_with_skidl(
         seed_placement=seed_placement,
         small_subcircuit_max=small_subcircuit_max,
         seed=seed,
+        deconflict_stubs=deconflict_stubs,
     )
 
     exe = python_exe or os.environ.get(SKIDL_PYTHON_ENV) or sys.executable
