@@ -155,15 +155,39 @@ def _render_script_text(
             "circuit has no components to render; nothing to hand to SKiDL"
         )
 
-    # Global net table: name -> is_power (OR-reduced across every pin that sees it).
+    # Global net table: name -> is_power (OR-reduced across every pin that sees it),
+    # plus name -> set of group names that touch it (for local/param classification).
     net_is_power: Dict[str, bool] = {}
-    for _gname, _node, comps in groups:
+    net_groups: Dict[str, set] = {}
+    for gname, _node, comps in groups:
         for comp in comps:
             for _pin_key, net in _component_pin_nets(comp):
                 name = net.name
                 net_is_power[name] = net_is_power.get(name, False) or bool(
                     getattr(net, "is_power", False)
                 )
+                net_groups.setdefault(name, set()).add(gname)
+
+    # The top group is the one owning the root circuit's own components (identified
+    # by node identity, NOT index: if the root owns no components it produces no
+    # group and groups[0] would be a child).
+    top_gname = None
+    for gname, node, _comps in groups:
+        if node is circuit:
+            top_gname = gname
+            break
+
+    def _is_local_net(name: str) -> bool:
+        """A net is LOCAL to a subcircuit (a wire, not a cross-sheet label) iff a
+        single non-top group touches it and it is not a power rail. skidl only
+        stubs/labels nets that SPAN nodes; a net created inside the @subcircuit
+        body is owned there and routes as local wires (stage 19, Blocker A)."""
+        grps = net_groups.get(name, ())
+        return (
+            len(grps) == 1
+            and top_gname not in grps
+            and not net_is_power.get(name, False)
+        )
 
     net_vars = _IdentFactory(prefix="n")
     net_var = {name: net_vars.get(name) for name in net_is_power}
@@ -197,14 +221,28 @@ def _render_script_text(
                     seen.add(net.name)
                     group_net_order.append(net.name)
 
+        # Split the group's nets: single-group internal nets become LOCALS
+        # declared in the def body (skidl wires them); everything else stays a
+        # parameter passed from build() (skidl labels cross-node nets).
+        group_local_nets = [n for n in group_net_order if _is_local_net(n)]
+        group_param_nets = [n for n in group_net_order if not _is_local_net(n)]
+
+        # Locals and params share the function namespace, so hand both out from
+        # the same factory to keep the identifiers unique.
         params = _IdentFactory(prefix="p")
-        param_of = {name: params.get(name) for name in group_net_order}
-        param_list = [param_of[name] for name in group_net_order]
+        param_of = {name: params.get(name) for name in group_param_nets}
+        param_list = [param_of[name] for name in group_param_nets]
+        local_of = {name: params.get(name) for name in group_local_nets}
+        net_ref = dict(param_of)
+        net_ref.update(local_of)
 
         w("@subcircuit")
         w(f"def {gname}({', '.join(param_list)}):")
-        if not comps:
+        if not comps and not group_local_nets:
             w("    pass")
+        # Declare local nets before parts so the pin hookups can reference them.
+        for name in group_local_nets:
+            w(f"    {local_of[name]} = Net({name!r})")
         refs = _IdentFactory(prefix="part")
         for comp in comps:
             lib, name = _split_symbol(getattr(comp, "symbol", "") or "")
@@ -221,15 +259,20 @@ def _render_script_text(
                 kwargs.append(f"footprint={str(footprint)!r}")
             w(f"    {var} = Part({', '.join(kwargs)})")
             for pin_key, net in _component_pin_nets(comp):
-                w(f"    {var}[{pin_key!r}] += {param_of[net.name]}")
+                w(f"    {var}[{pin_key!r}] += {net_ref[net.name]}")
         w("")
         w("")
-        group_call_args.append((gname, [net_var[n] for n in group_net_order]))
+        # Only the (cross-node) param nets are passed in from build(); locals are
+        # created inside the body above.
+        group_call_args.append((gname, [net_var[n] for n in group_param_nets]))
 
-    # build(): create every net once, then call each group with its nets.
+    # build(): create every cross-node net once, then call each group with its
+    # nets. LOCAL nets are created inside their owning subcircuit body instead.
     w("def build():")
     w("    reset()")
     for name in net_is_power:
+        if _is_local_net(name):
+            continue
         var = net_var[name]
         w(f"    {var} = Net({name!r})")
         if net_is_power[name]:

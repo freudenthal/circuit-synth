@@ -160,6 +160,31 @@ def _hier():
     _load(v5, gnd)
 
 
+@circuit(name="rc2")
+def _rc2(vin, gnd):
+    # Two-stage RC: the MID net is internal to this child (single non-top group,
+    # non-power) -> Blocker A localizes it, so skidl wires it on the child sheet.
+    r1 = Component(symbol="Device:R", ref="R1", value="1k", footprint=R_FP)
+    r2 = Component(symbol="Device:R", ref="R2", value="1k", footprint=R_FP)
+    c1 = Component(symbol="Device:C", ref="C1", value="100nF", footprint=C_FP)
+    mid = Net("MID")
+    r1[1] += vin
+    r1[2] += mid
+    r2[1] += mid
+    r2[2] += gnd
+    c1[1] += mid
+    c1[2] += gnd
+
+
+@circuit(name="SkidlHierLocal")
+def _hier_local():
+    vin, gnd = Net("VIN"), Net("GND")
+    src = Component(symbol="Device:R", ref="R9", value="100", footprint=R_FP)
+    src[1] += vin
+    src[2] += Net("V5")
+    _rc2(vin, gnd)
+
+
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
@@ -222,6 +247,26 @@ def test_render_hierarchical_has_wires_and_equivalent(
 
     result = compare_netlists(cs_net, sk_net)
     assert result.equivalent, "\n".join(result.messages)
+
+
+def test_localized_internal_net_routes_child_wires(tmp_path, skidl_python):
+    # Blocker A: a net internal to one subcircuit is declared as a subcircuit
+    # LOCAL (not a top-level pass-through label), so skidl routes it as wires on
+    # that child's sheet instead of labelling it.
+    c = _hier_local()
+    render_dir = tmp_path / "skidl"
+    render_with_skidl(c, render_dir, python_exe=skidl_python)
+
+    child = next(
+        (f for f in render_dir.glob("*.kicad_sch") if "rc2" in f.name),
+        None,
+    )
+    assert child is not None, "expected an rc2 child sheet"
+    child_wires = child.read_text(encoding="utf-8", errors="replace").count("(wire")
+    assert child_wires >= 1, (
+        f"localized MID net should route as wires on the child sheet, "
+        f"got {child_wires}"
+    )
 
 
 # --------------------------------------------------------------------------- #

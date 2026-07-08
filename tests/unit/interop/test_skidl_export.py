@@ -47,6 +47,28 @@ def _hier():
     _child(v5, gnd)
 
 
+@circuit(name="child_local")
+def _child_local(v5, gnd):
+    # Two series resistors create an internal MID net touched ONLY by this child
+    # (single non-top group, non-power) -> it should be localized (Blocker A).
+    r1 = Component(symbol="Device:R", ref="R", value="10k", footprint=R_FP)
+    r2 = Component(symbol="Device:R", ref="R", value="20k", footprint=R_FP)
+    mid = Net("MID")
+    r1[1] += v5
+    r1[2] += mid
+    r2[1] += mid
+    r2[2] += gnd
+
+
+@circuit(name="HierLocal")
+def _hier_local():
+    v5, gnd = Net("V5"), Net("GND")
+    src = Component(symbol="Device:R", ref="R", value="100", footprint=R_FP)
+    src[1] += Net("VIN")
+    src[2] += v5
+    _child_local(v5, gnd)
+
+
 # --------------------------------------------------------------------------- #
 # Script emission
 # --------------------------------------------------------------------------- #
@@ -90,6 +112,45 @@ def test_export_hierarchical_emits_multiple_subcircuits(tmp_path):
     assert text.count("@subcircuit") == 2
     # The shared V5 rail is passed as an argument into the child group.
     assert "def build():" in text
+
+
+def test_export_localizes_single_group_internal_net(tmp_path):
+    # Blocker A: a net touched by exactly one non-top subcircuit (and not power)
+    # is declared as a LOCAL inside that subcircuit's body so skidl wires it,
+    # instead of being homed at the top and passed through as a label.
+    text = export_skidl_script(_hier_local(), tmp_path / "hl_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    defs, sep, build = text.partition("def build():")
+    assert sep, "expected a build() function"
+
+    # MID is internal to the child -> declared in a subcircuit body, NOT in build().
+    assert "MID = Net('MID')" in defs
+    assert "Net('MID')" not in build
+    # ...and it is NOT a parameter of the child subcircuit.
+    child_sig = next(
+        ln for ln in defs.splitlines() if ln.startswith("def _HierLocal_child_local(")
+    )
+    assert "MID" not in child_sig
+    assert "GND" in child_sig  # power net still passed in as a param
+
+    # The shared V5 rail spans top + child -> created at top level and passed in.
+    assert "V5 = Net('V5')" in build
+    # GND is power and touched by one group -> stays top-level with POWER drive.
+    assert "GND = Net('GND')" in build
+    assert "GND.drive = POWER" in build
+
+
+def test_export_top_owned_and_power_nets_stay_top_level(tmp_path):
+    # A net the TOP group owns (VIN here) is NOT localized even though only one
+    # group touches it; and a power net is never localized. Both are created in
+    # build() rather than inside a subcircuit body.
+    text = export_skidl_script(_hier_local(), tmp_path / "hl2_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    defs, _sep, build = text.partition("def build():")
+    assert "VIN = Net('VIN')" in build  # top-owned -> top level
+    assert "Net('VIN')" not in defs  # not declared inside any subcircuit body
 
 
 def test_export_flatness_and_auto_stub_are_configurable(tmp_path):
