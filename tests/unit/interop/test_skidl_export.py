@@ -74,6 +74,37 @@ def _hier_local():
 # --------------------------------------------------------------------------- #
 
 
+@circuit(name="Cluster")
+def _cluster_demo():
+    u = Component(symbol="Amplifier_Operational:TL072", ref="U", value="TL072")
+    cap = Component(
+        symbol="Device:C", ref="C", value="100nF", footprint=R_FP, cluster="U1.8"
+    )
+    plain = Component(symbol="Device:C", ref="C", value="1uF", footprint=R_FP)
+    vcc, gnd = Net("VCC"), Net("GND")
+    u[8] += vcc
+    cap[1] += vcc
+    cap[2] += gnd
+    plain[1] += vcc
+    plain[2] += gnd
+
+
+def test_cluster_field_survives_validation_and_is_visible():
+    """Component(cluster=...) stores the hint in _extra_fields (no ValidationError)."""
+    c = Component(symbol="Device:C", ref="C2", value="100nF", cluster="U3.8")
+    assert c._extra_fields.get("cluster") == "U3.8"
+
+
+def test_export_emits_cluster_kwarg(tmp_path):
+    """The declared adjacency rides through to the emitted Part(...) kwargs."""
+    text = export_skidl_script(_cluster_demo(), tmp_path / "clus_skidl.py").read_text(
+        encoding="utf-8"
+    )
+    # The annotated cap carries cluster=; the un-annotated one does not.
+    assert "cluster='U1.8'" in text
+    assert text.count("cluster=") == 1
+
+
 def test_export_divider_script_structure(tmp_path):
     path = export_skidl_script(_divider(), tmp_path / "d_skidl.py")
     text = path.read_text(encoding="utf-8")

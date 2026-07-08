@@ -257,6 +257,14 @@ def _render_script_text(
             footprint = getattr(comp, "footprint", None)
             if footprint:
                 kwargs.append(f"footprint={str(footprint)!r}")
+            # Declared adjacency (stage 24): "REF.PIN" / "REF" snap hint. Rides
+            # through to skidl as part.cluster (skidl sets unknown Part kwargs as
+            # attributes); snap.py honors it before the pin-count heuristic.
+            cluster = getattr(comp, "_extra_fields", {}).get("cluster") or getattr(
+                comp, "cluster", None
+            )
+            if cluster:
+                kwargs.append(f"cluster={str(cluster)!r}")
             w(f"    {var} = Part({', '.join(kwargs)})")
             for pin_key, net in _component_pin_nets(comp):
                 w(f"    {var}[{pin_key!r}] += {net_ref[net.name]}")
