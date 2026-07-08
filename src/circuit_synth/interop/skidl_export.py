@@ -417,6 +417,13 @@ def render_with_skidl(
     exe = python_exe or os.environ.get(SKIDL_PYTHON_ENV) or sys.executable
     logger.info("Rendering with SKiDL: %s %s (cwd=%s)", exe, script_path.name, out_dir)
 
+    # Ask the skidl renderer to HARD-FAIL on any cross-net coordinate fusion
+    # (stage 24): a fused sheet must never be installed, so the render aborts and
+    # the equivalence gate falls back to the native (labels-only) render instead.
+    # The audit counts by net NAME, so legitimate same-net coincidences never
+    # trip it. Pre-set env wins (so a caller can opt out with SKIDL_AUDIT_STRICT=0).
+    child_env = {"SKIDL_AUDIT_STRICT": "1", **os.environ}
+
     try:
         proc = subprocess.run(
             [exe, script_path.name],
@@ -424,6 +431,7 @@ def render_with_skidl(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=child_env,
         )
     except FileNotFoundError as e:
         raise SkidlRenderError(
